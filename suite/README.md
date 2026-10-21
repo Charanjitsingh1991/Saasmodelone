@@ -1,0 +1,99 @@
+# SaaSModels One — Suite Engineering
+
+This directory is the engineering project for **SaaSModels One**, the commercial product. It is deliberately separate from the marketing site at the repository root.
+
+> Status: **M0 foundation** · October 2026
+> There is no application runtime in this directory yet. What exists is the part that is expensive to change later: scope, architecture decisions, security baseline, test strategy and the initial database schema.
+
+## First slice
+
+**People + Switch.** HRIS and payroll with jurisdiction packs for 50–500 person service businesses, with a migration console that imports history, rehearses it, reconciles totals and only then promotes to production. The core does not assume a country; each legal entity selects its jurisdiction, currency, locale and timezone.
+
+The product is an **organisation workspace with independently licensable modules**. Every tenant gets the platform core: organisation, legal entities, memberships, roles, audit, documents, search and export. A customer may license one module, several, or the full suite. The module catalog and entitlement model ship with the first slice, so adding CRM, Work, Money or Content later is a configuration change on the same schema — not a data migration or a second edition.
+
+| Module | Status | First job | Licensed alone? |
+| --- | --- | --- | --- |
+| Core platform | In build | Organisation, identity, roles, audit, documents, export | Included with any module |
+| Switch | In build | Migration, validation, rehearsal, reconciliation, rollback | Included, not sold separately |
+| People | In build | Employee record, leave, attendance, payroll with reviewed jurisdiction packs, documents | Yes |
+| CRM | In design | Accounts, contacts, pipeline, activity, forecast | Yes |
+| Work | In design | Clients, projects, allocations, timesheets, margin | Yes |
+| Money | In design | Proposals, contracts, invoices, payments, expenses | Yes |
+| Content | Research | Documents, knowledge, client rooms, publishing | Yes |
+| Procurement, Assets, Analytics | Planned | Not scoped for build | Not sold |
+
+## What is in this foundation
+
+```
+suite/
+  README.md
+  docs/
+    architecture.md          system shape, module catalog, entitlements, boundaries, deployment
+    security.md              threat model, baseline controls, design-partner gate
+    testing.md               non-negotiable suites and CI gates
+    roadmap.md               M0–M4 with exit criteria
+    adr/                     decisions that are costly to reverse
+  db/
+    README.md                schema conventions and how to apply migrations
+    migrations/
+      0001_core.sql          tenancy, identity, audit, events, documents, approvals
+      0002_people.sql        people, employment, leave, attendance, payroll
+      0003_work.sql          clients, engagements, projects, time, cost
+      0004_content.sql       content, versions, assets, document rooms
+      0005_money.sql         proposals, contracts, invoices, payments, expenses
+      0006_migration.sql     import batches, mapping, rows, issues, reconciliation
+      0007_modules.sql       module catalog, dependencies, tenant entitlements
+    seed/
+      0001_modules.sql       idempotent module catalog and dependency seed
+```
+
+## Non-negotiable rules
+
+1. **Tenant isolation is a database property.** Every tenant table carries `tenant_id`, has RLS enabled, and cross-tenant references are blocked by composite foreign keys.
+2. **Module access is an entitlement, checked on the server.** A licensed module is not a UI flag. Every module request resolves entitlement + role + scope; the database helper `app.has_active_module('<code>')` is the second line of defence.
+3. **One shared directory.** Person and client identity live in the platform. Modules extend those records; none creates a parallel employee or client table.
+4. **Money is integer minor units.** `bigint` plus currency. No floating point in payroll or billing.
+5. **Payroll history is append-only.** Finalised runs are reversed, never edited. Audit events cannot be updated or deleted.
+6. **Imports never write production directly.** Rows land in staging, carry provenance, and are promoted transactionally.
+7. **No statutory rule is invented by a model.** Contribution, withholding and statutory-reporting rules are versioned data per jurisdiction, reviewed by a qualified local advisor and proven with golden test cases.
+8. **Every export is complete.** A tenant can leave with its records and documents in open formats, module by module. Cancelling a module never destroys the data.
+
+## Database
+
+Target: PostgreSQL 16+ (17 recommended), `pgcrypto` and `citext`, in the data region selected for the tenant at provisioning.
+
+```bash
+# once a local Postgres exists
+for f in db/migrations/*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"; done
+for f in db/seed/*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"; done
+```
+
+The module catalog is reference data, seeded once and updated by migration. A tenant is then granted entitlements; the catalog itself is not writable by the runtime role.
+
+The migrations have been parsed by PostgreSQL's own parser and applied in embedded PostgreSQL 18.6 (PGlite) with tenant-isolation, entitlement and jurisdiction tests. A live PostgreSQL 16+ instance, the `pgcrypto`/`citext` extensions and a restore drill are still required before real data — see `db/README.md` and `docs/roadmap.md`.
+
+The application connects as a role that does **not** own the tables. Tenant context is set per transaction:
+
+```sql
+set local app.tenant_id = '<tenant-uuid>';
+```
+
+RLS denies all rows when the setting is absent. Tenant provisioning and pre-tenant membership discovery use a separate privileged path, not the runtime role.
+
+## What comes next
+
+1. Bootstrap the API and worker (TypeScript, Fastify, Postgres) with tenant-context and entitlement middleware, plus an isolation test harness.
+2. Implement organisation provisioning, identity, memberships, role/scope authorization and audit.
+3. Build the People vertical: person, employment, salary structure, payroll run, payslip.
+4. Build Switch against CSV first, then greytHR; prove reconciliation before adding a second connector.
+5. Put one design partner's migrated history through a sandbox rehearsal.
+6. Prove a second module can be enabled on the same tenant without a data migration; CRM is the first candidate because it shares the client directory.
+
+## Related documents
+
+- [`../docs/product-blueprint.md`](../docs/product-blueprint.md) — market, product scope, pricing, roadmap.
+- [`../docs/migration-blueprint.md`](../docs/migration-blueprint.md) — migration stages, staging model, error contract, rollback.
+
+## Not in this repository
+
+Credentials, customer data, production configuration, signing keys and design-partner documents. None of those belong in Git.

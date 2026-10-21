@@ -1,0 +1,36 @@
+{
+  "name": "saasmodels-one",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.18.3",
+  "engines": {
+    "node": ">=22.11 <25",
+    "pnpm": ">=10.18 <11"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "lint:boundaries": "eslint apps packages tests",
+    "typecheck": "tsc -p tsconfig.tools.json --noEmit && pnpm -r --if-present typecheck",
+    "test": "vitest run",
+    "db:bootstrap": "node --import tsx packages/db/src/cli.ts bootstrap",
+    "db:migrate": "node --import tsx packages/db/src/cli.ts migrate",
+    "db:seed": "node --import tsx packages/db/src/cli.ts seed",
+    "db:setup": "pnpm db:bootstrap && pnpm db:migrate && pnpm db:seed"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@saasmodels/db": "workspace:*",
+    "@saasmodels/testkit": "workspace:*",
+    "@types/node": "22.18.0",
+    "@types/pg": "8.23.1",
+    "dotenv": "18.0.8",
+    "eslint": "10.13.0",
+    "globals": "17.13.0",
+    "pg": "8.23.1",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.72.0",
+    "vitest": "4.1.12"
+  }
+}
