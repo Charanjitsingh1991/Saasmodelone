@@ -47,6 +47,10 @@ The API requires `DB_RUNTIME_URL`, `DB_AUTH_URL` and `APP_ORIGIN`. `APP_ORIGIN` 
 
 Email/password login uses Argon2id, and the browser holds only an opaque `saas_session` cookie whose SHA-256 hash is stored server-side. Identity is global (`app_user.email` is unique) while memberships are per tenant, so one user can sign in to several tenants with the same password. Invitations are created by the owner-only `pnpm db:invite` command and accepted once through the API; a first-time invitee sets a password, and an active user invited to a second tenant verifies its existing one. Login is rate-limited per source address and per email in memory, and auth responses are sent `Cache-Control: no-store`. There is no web login UI, password reset, MFA, OAuth, email delivery, tenant switching, device list, session rotation or distributed rate limiting yet. These are target behaviours, not shipping features.
 
+## Authorization
+
+Role authorization is server-side and shared. `@saasmodels/contracts` defines the seven membership roles, the four M0 permissions (`people.read`, `people.write`, `work.read`, `work.write`) and the role matrix. `withMemberTransaction` checks membership, platform access, the module entitlement and then the role permission, in that order, so an unentitled module never discloses role policy. Owner and admin hold all four permissions; HR holds People read/write; finance and auditor hold People read and Work read; manager holds People read and Work read/write; employee holds none until employee self-scope lands in M1. `/v1/context` returns canonical permissions and only the modules effective under both entitlement and role. Authenticated access denials are appended as `authorization.denied` with reason, method, registered route template and, where known, module/operation/permission; raw URLs, tokens, cookies and headers are not recorded. The audit is best-effort, so a failed audit write is logged and the denial is still returned. Scope authorization (legal entity, department, project, client), role administration and seat enforcement are not built.
+
 ## Tests
 
 ```bash
@@ -56,7 +60,7 @@ pnpm typecheck
 pnpm test
 ```
 
-`pnpm test` uses disposable local databases created through `packages/testkit`. Integration tests assert every baseline migration applies, re-application is a no-op, the seed is idempotent, a tampered migration checksum is rejected, remote URLs are rejected, and the runtime and auth roles each stay inside their privilege allowlist. Boundary tests prove that `pnpm lint:boundaries` rejects a forbidden `apps/web` to `packages/db` import.
+`pnpm test` uses disposable local databases created through `packages/testkit`. Integration tests assert every baseline migration applies, re-application is a no-op, the seed is idempotent, a tampered migration checksum is rejected, remote URLs are rejected, and the runtime and auth roles each stay inside their privilege allowlist. The authorization suite proves the exact seven-role policy, entitlement-before-role ordering, role denial with no callback, and the audit rows for authenticated denials, including route-template-only paths and an audit-write failure. Boundary tests prove that `pnpm lint:boundaries` rejects a forbidden `apps/web` to `packages/db` import.
 
 PostgreSQL 16 is part of the CI matrix when the GitHub Actions workflow lands; local development targets 17.
 

@@ -1,5 +1,10 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import cookie from '@fastify/cookie';
+import {
+  hasPermission,
+  permissionFor,
+  permissionsForRole,
+} from '@saasmodels/contracts';
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -13,11 +18,15 @@ import {
   MembershipDeniedError,
   ModuleAccessDeniedError,
   PlatformAccessDeniedError,
+  recordAccessDenial,
   revokeSession,
+  RoleAccessDeniedError,
   SESSION_TTL_MS,
   acceptInvitation,
   withMemberTransaction,
+  type AccessDenialReason,
   type AuthPool,
+  type ModuleOperation,
   type SessionInfo,
   type SessionRecord,
   type RuntimePool,
@@ -58,6 +67,7 @@ type AccessErrorBody = {
     code: string;
     module?: string;
     operation?: string;
+    permission?: string;
   };
 };
 
@@ -76,7 +86,58 @@ function unauthenticated(reply: FastifyReply): AccessErrorBody {
   return { error: { code: 'UNAUTHENTICATED' } };
 }
 
-function accessError(error: unknown, reply: FastifyReply): AccessErrorBody {
+async function accessError(
+  pool: RuntimePool,
+  error: unknown,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  session: SessionRecord,
+): Promise<AccessErrorBody> {
+  let reason: AccessDenialReason | null = null;
+  let module: string | undefined;
+  let operation: ModuleOperation | undefined;
+  let permission: string | undefined;
+
+  if (error instanceof MembershipDeniedError) {
+    reason = 'MEMBERSHIP_DENIED';
+  } else if (error instanceof PlatformAccessDeniedError) {
+    reason = 'PLATFORM_ACCESS_DENIED';
+  } else if (error instanceof ModuleAccessDeniedError) {
+    reason = 'MODULE_NOT_ENTITLED';
+    module = error.module;
+    operation = error.operation;
+  } else if (error instanceof RoleAccessDeniedError) {
+    reason = 'ROLE_DENIED';
+    module = error.module;
+    operation = error.operation;
+    permission = error.permission;
+  }
+
+  if (reason) {
+    try {
+      // The registered route template, never the raw URL: a query string can
+      // carry secrets and must not reach the audit row.
+      const path = request.routeOptions.url;
+      if (!path) {
+        throw new Error('Route template is unavailable for a denial audit');
+      }
+      await recordAccessDenial(pool, {
+        tenantId: session.tenantId,
+        userId: session.userId,
+        reason,
+        method: request.method,
+        path,
+        module,
+        operation,
+        permission,
+        ip: request.ip,
+        userAgent: request.headers['user-agent'] ?? null,
+      });
+    } catch (auditError) {
+      request.log.error(auditError);
+    }
+  }
+
   if (error instanceof InvalidTenantContextError) {
     reply.code(401);
     return { error: { code: 'UNAUTHENTICATED' } };
@@ -98,6 +159,10 @@ function accessError(error: unknown, reply: FastifyReply): AccessErrorBody {
         operation: error.operation,
       },
     };
+  }
+  if (error instanceof RoleAccessDeniedError) {
+    reply.code(403);
+    return { error: { code: 'ROLE_DENIED', permission: error.permission } };
   }
   throw error;
 }
@@ -395,17 +460,30 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
               order by m.code`,
           );
 
+          // The database answers entitlement; the role policy answers authorization.
+          // A module is effective only where both allow the operation.
+          const effective = modules.rows.flatMap((row) => {
+            const read = permissionFor(row.code, 'read');
+            const write = permissionFor(row.code, 'write');
+            const canRead =
+              row.canRead && read !== null && hasPermission(member.role, read);
+            const canWrite =
+              row.canWrite && write !== null && hasPermission(member.role, write);
+            return canRead || canWrite ? [{ ...row, canRead, canWrite }] : [];
+          });
+
           return {
             userId: session.userId,
             tenantId: session.tenantId,
             role: member.role,
+            permissions: permissionsForRole(member.role),
             switchAccess: switchAccess.rows[0]?.allowed ?? false,
-            modules: modules.rows.filter((row) => row.canRead || row.canWrite),
+            modules: effective,
           };
         },
       );
     } catch (error) {
-      return accessError(error, reply);
+      return await accessError(pool, error, request, reply, session);
     }
   });
 
@@ -446,7 +524,7 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
           },
         );
       } catch (error) {
-        return accessError(error, reply);
+        return await accessError(pool, error, request, reply, session);
       }
     });
 
@@ -488,7 +566,7 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
           },
         );
       } catch (error) {
-        return accessError(error, reply);
+        return await accessError(pool, error, request, reply, session);
       }
     });
   }

@@ -15,7 +15,7 @@ Deliverables:
 - Module catalog, dependency declarations, tenant entitlements and organisation provisioning.
 - Shared person and client directory, owned by the platform rather than a module.
 - PostgreSQL schema applied to a local instance and reviewed by a second engineer.
-- API/worker skeleton with tenant-context and entitlement middleware; email/password login, opaque server-side sessions and one-time invitation acceptance; plus a test harness.
+- API/worker skeleton with tenant-context, entitlement and role checks; email/password login, opaque server-side sessions and one-time invitation acceptance; authenticated access-denial audit; plus a test harness.
 - CI pipeline with type check, lint, tests, secret scan and dependency audit.
 - Threat model reviewed; design-partner gate drafted.
 
@@ -27,8 +27,9 @@ Exit criteria:
 - A synthetic public tenant can be provisioned with People; an internal tenant can also receive the planned CRM module through an internal-source entitlement, without a schema change or data migration.
 - Migrations and the module seed apply cleanly to an empty database and roll forward from the previous version.
 - A signed-in user can reach an empty People screen and sees only the modules the tenant is entitled to.
+- A test proves role authorization is enforced after entitlement: an entitled module with a role that lacks the permission returns `ROLE_DENIED`, and an unentitled module returns `MODULE_NOT_ENTITLED` without disclosing role policy.
 
-Progress (October 2026): database and API tests prove tenant isolation, platform access, module entitlement and the auth-role boundary with real sessions. Email/password login, session validation, logout and one-time invitation acceptance exist. M0 has **not** exited: there is no web UI, production People route, role/scope enforcement or payroll, so the signed-in People-screen criterion and the CI/secret-scan items remain open.
+Progress (October 2026): database and API tests prove tenant isolation, platform access, module entitlement, the auth-role boundary and the M0 role matrix with real sessions. Email/password login, session validation, logout, one-time invitation acceptance, role authorization for People and Work and authenticated access-denial audit exist. M0 has **not** exited: there is no web UI, production People route, scope authorization or payroll, so the signed-in People-screen criterion and the CI/secret-scan items remain open.
 
 ## M1 — Internal People payroll
 
@@ -36,7 +37,7 @@ Progress (October 2026): database and API tests prove tenant isolation, platform
 
 Scope:
 
-- Role and scope authorization on top of the existing identity, membership, session and audit foundations.
+- Scope authorization (legal entity, department, project, client) and employee self-scope on top of the M0 role policy; role administration and seat enforcement.
 - Module-aware authorization: entitlement, then role, then scope.
 - Person, employment, compensation, bank and jurisdiction-scoped identifiers.
 - Salary structures and payroll inputs.

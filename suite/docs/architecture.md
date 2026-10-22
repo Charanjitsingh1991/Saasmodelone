@@ -174,7 +174,7 @@ Events carry identifiers, not large payloads. Consumers must be idempotent, and 
 3. Verify an active membership for that user/organisation.
 4. Open a transaction and run `set local app.tenant_id = '<uuid>'`.
 5. Check that the module is entitled and active for the tenant.
-6. Authorize the action against role + scope (entity, department, project, client).
+6. Authorize the action against the role permission policy for the module gate. M0 covers the two gated modules, People and Work; scope (legal entity, department, project, client) is M1.
 7. Execute the module service.
 8. Append audit events and domain events in the same transaction.
 9. Commit.
@@ -190,7 +190,7 @@ Current authentication shape:
 - Login is rate-limited in memory per process by source address and additionally per email; invitation acceptance is rate-limited per source address. The limiter keys on the observed socket address, so behind a proxy without `trustProxy` every client shares the proxy address. It is not a distributed limiter and not a substitute for edge/WAF controls.
 - Auth responses (`/v1/auth/*`), including errors and logout, are sent with `Cache-Control: no-store`.
 
-Not built: password reset, email delivery, MFA, OAuth/SSO, SCIM, tenant switching, session rotation, device lists, a distributed rate limiter, authentication-event audit, a login UI, and role/scope enforcement. A valid session proves identity only; it does not authorize an action.
+Not built: password reset, email delivery, MFA, OAuth/SSO, SCIM, tenant switching, session rotation, device lists, a distributed rate limiter, authentication-event audit, a login UI, scope authorization, role administration and seat enforcement. A valid session proves identity only; each member request resolves the role server-side and a gated module requires both its entitlement and the role permission.
 
 `app.has_module_read('<code>')` and `app.has_module_write('<code>')` are the tenant-scoped, security-definer helpers for database checks, and module tables carry restrictive RLS policies built on them (installed idempotently by `app.apply_module_policies()`). `app.has_active_module('<code>')` remains only as an exact alias of the write helper. Application services must still enforce entitlement explicitly; the helpers are a second line of defence, not a replacement for the policy layer.
 
@@ -198,14 +198,16 @@ See [`adr/0002-postgres-rls-tenancy.md`](adr/0002-postgres-rls-tenancy.md) and [
 
 ### Authorization model
 
-- **Role** answers what kind of action is allowed: owner, admin, HR, sales, finance, manager, employee, auditor.
-- **Scope** answers where: legal entity, department, client, project.
-- **Entitlement** answers whether the organisation has licensed the module at all.
-- **Sensitive actions** (payroll finalise, bank change, data export, role change) require an explicit permission and are always audited.
-- A person's manager may see team leave and timesheets, but not salary, bank details or statutory identifiers.
-- Client contacts never use internal roles; they access only a document room through a separate principal type.
+M0 implements entitlement and role authorization; scope is M1.
 
-Authorization is checked on the server for every request and again in the query shape (for example, filtering by permitted project IDs). UI hiding is not authorization.
+- **Entitlement** answers whether the organisation has licensed the module at all. The request path checks it first, so an unentitled module never discloses role policy.
+- **Role** answers what kind of action is allowed within an entitled module. The policy lives in `@saasmodels/contracts` and is applied by `withMemberTransaction`. The M0 roles are owner, admin, hr, finance, manager, employee and auditor. Owner and admin hold all four People/Work permissions; HR holds People read/write; finance and auditor hold People read and Work read; manager holds People read and Work read/write; employee holds none until self-scope is designed in M1.
+- **Scope** answers where: legal entity, department, client, project. Not built.
+- **Sensitive actions** (payroll finalise, bank change, data export, role change) require an explicit permission and are always audited. Beyond the four M0 module permissions, they are not built.
+- A person's manager may see team leave and timesheets, but not salary, bank details or statutory identifiers. Target.
+- Client contacts never use internal roles; they access only a document room through a separate principal type. Target.
+
+Authorization is checked on the server for every request; when scope authorization lands it will also constrain the query shape (for example, filtering by permitted project IDs). UI hiding is not authorization. A gated route that skips `withMemberTransaction` loses the role check; `withTenantTransaction` is system-only. Authenticated access denials are recorded as `authorization.denied` (see `security.md` §7).
 
 ---
 

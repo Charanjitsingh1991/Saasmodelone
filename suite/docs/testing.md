@@ -61,7 +61,15 @@ Test the catalog seed twice: it must be idempotent and must not overwrite review
 
 ### 2.3 Authorization matrix
 
-A table-driven test per role × scope × action. Minimally:
+Implemented in M0 for People and Work, against the real database:
+
+- The policy unit suite asserts the exact permission list and order for all seven roles; owner and admin hold all four; employee is empty; seven role codes with no duplicates; `hasPermission` and `permissionFor` fail closed for an unknown role, permission or module/operation pair.
+- A role with the entitlement but without the permission receives `ROLE_DENIED` and the callback never runs: employee on People read/write, HR on Work read/write.
+- The entitlement is checked first: a cancelled HR tenant, an owner without Work and an admin without People receive `MODULE_NOT_ENTITLED`, not a role error.
+- `/v1/context` returns the role's permissions independently of licensing, and only the effective modules where the database entitlement and the role permission both allow the operation.
+- An ungated member transaction still resolves and returns the role; every route that touches module data must pass a gate.
+
+Target matrix per role × scope × action, not built:
 
 - Employee: own profile, own payslips, own leave; no salary visibility for others.
 - Manager: team leave/timesheets; no bank or statutory identifiers.
@@ -71,7 +79,7 @@ A table-driven test per role × scope × action. Minimally:
 - Auditor: read-only audit and records, no mutations.
 - Client contact: only their document room, no directory or internal search.
 
-Denied actions must produce an audit event, not a generic 500.
+Denied authenticated access must produce one `authorization.denied` audit event, not a generic 500. Unauthenticated requests and non-access failures are not recorded by that path.
 
 ### 2.4 Payroll golden cases
 
@@ -118,9 +126,10 @@ Test the ugly cases: blank rows, duplicate tax-ID/email, Unicode names, Excel da
 - The runtime role can append an audit row for its own tenant only, and can never read, update or delete the audit trail.
 - The audit writer takes the tenant from `app.tenant_id`; an insert for another tenant is rejected by RLS.
 - Provisioning and entitlement grant/cancellation append before/after audit rows in the same transaction.
+- Every authenticated access denial appends exactly one `authorization.denied` row with the session actor, IP, user agent, reason, registered route template and any known module/operation/permission. The raw query string, role, email, tenant slug, headers, cookies, tokens and bodies are absent. A missing or random session, an unknown error and a successful request append no denial row.
+- Denial audit is best-effort: a failing audit write is logged and the original 403 denial is still returned. Privileged business actions remain fail-closed: an audit failure rolls back the action, tested for an employment insert.
 - A finalised payroll run cannot be edited; reversal produces new records.
 - Role changes, exports, login failures and connector credential changes are target audit events, not yet implemented.
-- Audit write failure rolls back the underlying privileged action.
 - Domain events are delivered at least once and consumers are idempotent.
 
 ### 2.7 Request layer
@@ -130,14 +139,15 @@ The API and worker share one tenant transaction helper, and the same suites prov
 - The principal comes only from a valid `saas_session` cookie resolved server-side. Missing, malformed, expired, revoked or tampered cookies fail with 401 before data is read. No header, query string, body or other cookie can supply a tenant; `x-tenant-id` and a `tenant_id` parameter are ignored.
 - Request routes resolve an active membership before platform access. A non-member or suspended member receives `MEMBERSHIP_DENIED` even when the tenant is suspended, so tenant state is not disclosed. A member of a suspended, closed or deleted tenant receives `PLATFORM_ACCESS_DENIED`.
 - A user with a valid membership in tenant A cannot use that user ID with tenant B.
-- The resolved role is passed to the route callback and returned by `/v1/context`. An unknown stored role is a data-integrity error, never a permissive default. Role and scope enforcement is not implemented yet.
-- Tenant and user context are transaction-local. The membership check, platform check, module gate and caller's query run on the same client and in the same transaction.
+- The resolved role is passed to the route callback and returned by `/v1/context`. An unknown stored role is a data-integrity error, never a permissive default. A gate checks membership, platform access, module entitlement and role permission in that order; an entitled module with a role lacking the permission returns `ROLE_DENIED` with the permission name and no rows. Scope enforcement is not implemented.
+- Tenant and user context are transaction-local. The membership check, platform check, module gate, role check and caller's query run on the same client and in the same transaction.
 - Every module route and job declares a read or write gate; an unentitled operation returns a stable denial code and no rows.
 - Attempts to override the tenant with `x-tenant-id` or a `tenant_id` parameter return only the principal's records.
 - Reusing one pool for sequential tenants and users does not leak `app.tenant_id`, `app.user_id` or the resolved role.
 - A denied gate or a failed callback rolls back; a callback error persists nothing.
+- Each authenticated access denial appends exactly one `authorization.denied` row. The registered route template is stored, never a query string; metadata contains no role, email, tenant slug, header, cookie, token, body or stack. A denial is still returned when the audit write fails.
 
-These suites use the real database, the runtime and auth roles, real Argon2 verification and real cookies, not mocks. They sit above the table-level denial suite. Role and scope enforcement is still not implemented.
+These suites use the real database, the runtime and auth roles, real Argon2 verification and real cookies, not mocks. They sit above the table-level denial suite. Scope enforcement, employee self-scope, role administration and seat enforcement are still not implemented.
 
 ### 2.8 Provisioning, membership and entitlements
 
@@ -217,7 +227,8 @@ A merge is blocked when any of these fail:
 - Tenant isolation suite.
 - Module entitlement suite, including expiry, cancellation, dependency degradation and catalog write protection.
 - Authentication and session suite: login, invitation acceptance, cookie attributes, session expiry/revocation, CSRF/Origin checks and the auth-role privilege matrix.
-- Authorization matrix.
+- Authorization matrix: the exact seven-role policy, role denial after entitlement, entitlement-before-role ordering, and `/v1/context` permissions and effective modules.
+- Denied-request audit: one `authorization.denied` row per authenticated access denial, no query/header/token leakage, and a denial still returned when the audit write fails.
 - Payroll golden cases for the current and previous rule-pack versions in every covered jurisdiction.
 - Migration fixture → reconciliation → promotion → export.
 - Dependency audit with no unapproved critical vulnerability.

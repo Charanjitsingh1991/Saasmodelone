@@ -31,6 +31,8 @@ export {
   databaseUrlWithName,
   redactDatabaseUrl,
 } from './config.js';
+export type { AccessDenialInput, AccessDenialReason } from './denials.js';
+export { ACCESS_DENIAL_REASONS, recordAccessDenial } from './denials.js';
 export type {
   CancelEntitlementInput,
   EntitlementErrorCode,
@@ -75,6 +77,7 @@ export {
   MembershipDeniedError,
   ModuleAccessDeniedError,
   PlatformAccessDeniedError,
+  RoleAccessDeniedError,
   withMemberTransaction,
   withTenantTransaction,
 } from './tenant.js';

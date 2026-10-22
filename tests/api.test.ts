@@ -27,6 +27,8 @@ type Sessions = {
   a: SessionFixture;
   b: SessionFixture;
   cancelled: SessionFixture;
+  employee: SessionFixture;
+  workHr: SessionFixture;
   suspendedTenant: SessionFixture;
   closedTenant: SessionFixture;
   deletedTenant: SessionFixture;
@@ -40,6 +42,13 @@ let fixtures: AccessFixtures | undefined;
 let runtime: RuntimePool | undefined;
 let auth: AuthPool | undefined;
 let sessions: Sessions | undefined;
+
+function db(): TestDatabase {
+  if (!database) {
+    throw new Error('Test database has not been created');
+  }
+  return database;
+}
 
 function fx(): AccessFixtures {
   if (!fixtures) {
@@ -77,6 +86,59 @@ async function sessionFor(
     userId: fixture.userId,
     tenantId: fixture.tenantId,
   });
+}
+
+type DenialRow = {
+  action: string;
+  entity_type: string;
+  entity_id: string | null;
+  actor_type: string;
+  actor_user_id: string | null;
+  metadata: Record<string, unknown>;
+};
+
+async function withOwner<T>(fn: (client: Client) => Promise<T>): Promise<T> {
+  const client = new Client({ connectionString: db().ownerUrl });
+  await client.connect();
+  try {
+    return await fn(client);
+  } finally {
+    await client.end();
+  }
+}
+
+async function denialRows(tenantId: string): Promise<DenialRow[]> {
+  return withOwner(async (client) => {
+    const result = await client.query<DenialRow>(
+      `select action, entity_type, entity_id, actor_type, actor_user_id, metadata
+         from audit_event
+        where tenant_id = $1
+          and action = 'authorization.denied'
+        order by occurred_at, id`,
+      [tenantId],
+    );
+    return result.rows;
+  });
+}
+
+async function latestDenial(tenantId: string, reason: string): Promise<DenialRow> {
+  const row = await withOwner(async (client) => {
+    const result = await client.query<DenialRow>(
+      `select action, entity_type, entity_id, actor_type, actor_user_id, metadata
+         from audit_event
+        where tenant_id = $1
+          and action = 'authorization.denied'
+          and metadata ->> 'reason' = $2
+        order by occurred_at desc, id desc
+        limit 1`,
+      [tenantId, reason],
+    );
+    return result.rows[0];
+  });
+  if (!row) {
+    throw new Error(`No ${reason} audit row was recorded for tenant ${tenantId}`);
+  }
+  return row;
 }
 
 async function withApp<T>(
@@ -117,6 +179,8 @@ beforeAll(async () => {
       a: await sessionFor(owner, fixtures.a),
       b: await sessionFor(owner, fixtures.b),
       cancelled: await sessionFor(owner, fixtures.cancelled),
+      employee: await sessionFor(owner, fixtures.employee),
+      workHr: await sessionFor(owner, fixtures.workHr),
       suspendedTenant: await sessionFor(owner, fixtures.suspended),
       closedTenant: await sessionFor(owner, fixtures.closed),
       deletedTenant: await sessionFor(owner, fixtures.deleted),
@@ -284,6 +348,7 @@ describe('API request layer', () => {
         userId: a.userId,
         tenantId: a.tenantId,
         role: 'owner',
+        permissions: ['people.read', 'people.write', 'work.read', 'work.write'],
         switchAccess: true,
         modules: [{ code: 'people', canRead: true, canWrite: true }],
       });
@@ -336,6 +401,7 @@ describe('API request layer', () => {
         userId: b.userId,
         tenantId: b.tenantId,
         role: 'admin',
+        permissions: ['people.read', 'people.write', 'work.read', 'work.write'],
         switchAccess: true,
         modules: [{ code: 'work', canRead: true, canWrite: true }],
       });
@@ -388,7 +454,8 @@ describe('API request layer', () => {
       expect(context.json()).toEqual({
         userId: c.userId,
         tenantId: c.tenantId,
-        role: 'employee',
+        role: 'hr',
+        permissions: ['people.read', 'people.write'],
         switchAccess: false,
         modules: [{ code: 'people', canRead: true, canWrite: false }],
       });
@@ -409,6 +476,91 @@ describe('API request layer', () => {
             status: 'active',
           },
         ],
+      });
+    });
+  });
+
+  test('reports role permissions independently of effective module access', async () => {
+    const employee = fx().employee;
+    const workHr = fx().workHr;
+
+    await withApp(async (app) => {
+      const employeeContext = await app.inject({
+        method: 'GET',
+        url: '/v1/context',
+        headers: { cookie: session('employee').cookie },
+      });
+      expect(employeeContext.statusCode).toBe(200);
+      expect(employeeContext.json()).toEqual({
+        userId: employee.userId,
+        tenantId: employee.tenantId,
+        role: 'employee',
+        permissions: [],
+        switchAccess: true,
+        modules: [],
+      });
+
+      const hrContext = await app.inject({
+        method: 'GET',
+        url: '/v1/context',
+        headers: { cookie: session('workHr').cookie },
+      });
+      expect(hrContext.statusCode).toBe(200);
+      expect(hrContext.json()).toEqual({
+        userId: workHr.userId,
+        tenantId: workHr.tenantId,
+        role: 'hr',
+        permissions: ['people.read', 'people.write'],
+        switchAccess: true,
+        modules: [],
+      });
+    });
+  });
+
+  test('an entitled module is denied when the role lacks its permission', async () => {
+    await withApp(async (app) => {
+      const cases = [
+        {
+          session: 'employee',
+          url: '/v1/proof/people/employment',
+          permission: 'people.read',
+        },
+        {
+          session: 'workHr',
+          url: '/v1/proof/work/projects',
+          permission: 'work.read',
+        },
+      ] as const;
+
+      for (const entry of cases) {
+        const response = await app.inject({
+          method: 'GET',
+          url: entry.url,
+          headers: { cookie: session(entry.session).cookie },
+        });
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toEqual({
+          error: { code: 'ROLE_DENIED', permission: entry.permission },
+        });
+        expect(response.json()).not.toHaveProperty('items');
+      }
+    });
+  });
+
+  test('an unentitled module is denied before the role is considered', async () => {
+    await withApp(async (app) => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/v1/proof/work/projects',
+        headers: { cookie: session('cancelled').cookie },
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toEqual({
+        error: {
+          code: 'MODULE_NOT_ENTITLED',
+          module: 'work',
+          operation: 'read',
+        },
       });
     });
   });
@@ -501,7 +653,7 @@ describe('API request layer', () => {
       expect(third.json()).toMatchObject({
         userId: c.userId,
         tenantId: c.tenantId,
-        role: 'employee',
+        role: 'hr',
       });
 
       const fourth = await app.inject({
@@ -536,6 +688,184 @@ describe('API request layer', () => {
       expect(deniedEmployment.statusCode).toBe(403);
       expect(deniedEmployment.json()).not.toHaveProperty('items');
     });
+  });
+
+  test('records exactly one audit row for each authenticated access denial', async () => {
+    const cases = [
+      {
+        session: 'nonMember',
+        url: '/v1/context',
+        tenantId: fx().a.tenantId,
+        userId: fx().nonMemberUserId,
+        code: 'MEMBERSHIP_DENIED',
+        metadata: {
+          reason: 'MEMBERSHIP_DENIED',
+          method: 'GET',
+          path: '/v1/context',
+        },
+      },
+      {
+        session: 'suspendedTenant',
+        url: '/v1/context',
+        tenantId: fx().suspended.tenantId,
+        userId: fx().suspended.userId,
+        code: 'PLATFORM_ACCESS_DENIED',
+        metadata: {
+          reason: 'PLATFORM_ACCESS_DENIED',
+          method: 'GET',
+          path: '/v1/context',
+        },
+      },
+      {
+        session: 'a',
+        url: '/v1/proof/work/projects',
+        tenantId: fx().a.tenantId,
+        userId: fx().a.userId,
+        code: 'MODULE_NOT_ENTITLED',
+        metadata: {
+          reason: 'MODULE_NOT_ENTITLED',
+          method: 'GET',
+          path: '/v1/proof/work/projects',
+          module: 'work',
+          operation: 'read',
+        },
+      },
+      {
+        session: 'employee',
+        url: '/v1/proof/people/employment',
+        tenantId: fx().employee.tenantId,
+        userId: fx().employee.userId,
+        code: 'ROLE_DENIED',
+        metadata: {
+          reason: 'ROLE_DENIED',
+          method: 'GET',
+          path: '/v1/proof/people/employment',
+          module: 'people',
+          operation: 'read',
+          permission: 'people.read',
+        },
+      },
+    ] as const;
+
+    await withApp(async (app) => {
+      for (const entry of cases) {
+        const before = await denialRows(entry.tenantId);
+        const response = await app.inject({
+          method: 'GET',
+          url: entry.url,
+          headers: { cookie: session(entry.session).cookie },
+        });
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toMatchObject({ error: { code: entry.code } });
+
+        const after = await denialRows(entry.tenantId);
+        expect(after).toHaveLength(before.length + 1);
+        expect(after[after.length - 1]).toMatchObject({
+          action: 'authorization.denied',
+          entity_type: 'request',
+          entity_id: null,
+          actor_type: 'user',
+          actor_user_id: entry.userId,
+          metadata: entry.metadata,
+        });
+      }
+    });
+  });
+
+  test('does not audit unauthenticated or successful requests', async () => {
+    const a = fx().a;
+
+    await withApp(async (app) => {
+      const before = await denialRows(a.tenantId);
+
+      for (const headers of [
+        {},
+        { cookie: `saas_session=${randomToken()}` },
+      ]) {
+        const response = await app.inject({
+          method: 'GET',
+          url: '/v1/context',
+          headers,
+        });
+        expect(response.statusCode).toBe(401);
+      }
+
+      const success = await app.inject({
+        method: 'GET',
+        url: '/v1/context',
+        headers: { cookie: session('a').cookie },
+      });
+      expect(success.statusCode).toBe(200);
+
+      expect(await denialRows(a.tenantId)).toHaveLength(before.length);
+    });
+  });
+
+  test('the denial audit stores the route template, never the raw query', async () => {
+    await withApp(async (app) => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/v1/proof/people/employment?probe=SECRET',
+        headers: {
+          cookie: session('employee').cookie,
+          'x-probe': 'SECRET',
+        },
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toEqual({
+        error: { code: 'ROLE_DENIED', permission: 'people.read' },
+      });
+    });
+
+    const row = await latestDenial(fx().employee.tenantId, 'ROLE_DENIED');
+    expect(row.metadata).toEqual({
+      reason: 'ROLE_DENIED',
+      method: 'GET',
+      path: '/v1/proof/people/employment',
+      module: 'people',
+      operation: 'read',
+      permission: 'people.read',
+    });
+
+    const metadata = JSON.stringify(row.metadata);
+    const token = session('employee').cookie.replace(/^saas_session=/, '');
+    expect(metadata).not.toContain('SECRET');
+    expect(metadata).not.toContain('@example.test');
+    expect(metadata).not.toContain(token);
+    expect(metadata).not.toContain('saas_session');
+    expect(metadata).not.toContain('cookie');
+    expect(metadata).not.toContain('user-agent');
+  });
+
+  test('a denial is still returned when the audit write fails', async () => {
+    const real = runtimePool();
+    let connects = 0;
+    const flakyPool = {
+      connect: async () => {
+        connects += 1;
+        if (connects === 1) {
+          return real.connect();
+        }
+        throw new Error('audit database unavailable');
+      },
+    } as unknown as RuntimePool;
+
+    await withApp(
+      async (app) => {
+        const response = await app.inject({
+          method: 'GET',
+          url: '/v1/proof/people/employment',
+          headers: { cookie: session('employee').cookie },
+        });
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toEqual({
+          error: { code: 'ROLE_DENIED', permission: 'people.read' },
+        });
+      },
+      { pool: flakyPool },
+    );
+
+    expect(connects).toBe(2);
   });
 
   test('proof routes are not registered by default', async () => {

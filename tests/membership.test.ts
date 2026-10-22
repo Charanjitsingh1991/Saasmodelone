@@ -126,7 +126,7 @@ describe('app.current_member_role', () => {
 
     expect(await memberRole(a.tenantId, a.userId)).toBe('owner');
     expect(await memberRole(b.tenantId, b.userId)).toBe('admin');
-    expect(await memberRole(c.tenantId, c.userId)).toBe('employee');
+    expect(await memberRole(c.tenantId, c.userId)).toBe('hr');
   });
 
   test('returns null for no membership, a suspended membership and a cross-tenant user', async () => {
@@ -251,6 +251,80 @@ describe('withMemberTransaction', () => {
         async () => 'not reached',
       ),
     ).rejects.toMatchObject({ code: 'PLATFORM_ACCESS_DENIED' });
+  });
+
+  test('an entitled module still denies a role without its permission', async () => {
+    const employee = fx().employee;
+    const workHr = fx().workHr;
+
+    const deniedCases = [
+      { fixture: employee, module: 'people', operation: 'read' },
+      { fixture: employee, module: 'people', operation: 'write' },
+      { fixture: workHr, module: 'work', operation: 'read' },
+      { fixture: workHr, module: 'work', operation: 'write' },
+    ] as const;
+
+    for (const { fixture, module, operation } of deniedCases) {
+      let ran = false;
+      await expect(
+        withMemberTransaction(
+          runtimePool(),
+          {
+            tenantId: fixture.tenantId,
+            userId: fixture.userId,
+            gate: { module, operation },
+          },
+          async () => {
+            ran = true;
+            return 'not reached';
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: 'ROLE_DENIED',
+        module,
+        operation,
+        permission: `${module}.${operation}`,
+      });
+      expect(ran).toBe(false);
+    }
+  });
+
+  test('checks the entitlement before the role permission', async () => {
+    const entitledCases = [
+      { fixture: fx().cancelled, module: 'work', operation: 'read' },
+      { fixture: fx().a, module: 'work', operation: 'read' },
+      { fixture: fx().b, module: 'people', operation: 'write' },
+    ] as const;
+
+    for (const { fixture, module, operation } of entitledCases) {
+      await expect(
+        withMemberTransaction(
+          runtimePool(),
+          {
+            tenantId: fixture.tenantId,
+            userId: fixture.userId,
+            gate: { module, operation },
+          },
+          async () => 'not reached',
+        ),
+      ).rejects.toMatchObject({
+        code: 'MODULE_NOT_ENTITLED',
+        module,
+        operation,
+      });
+    }
+  });
+
+  test('an ungated member transaction returns the role without a module check', async () => {
+    const employee = fx().employee;
+
+    const member = await withMemberTransaction(
+      runtimePool(),
+      { tenantId: employee.tenantId, userId: employee.userId },
+      async (_client, context) => context,
+    );
+
+    expect(member).toEqual({ role: 'employee' });
   });
 
   test('an unknown stored role is a data-integrity error, never a permissive default', async () => {

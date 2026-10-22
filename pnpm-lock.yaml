@@ -14,6 +14,9 @@ importers:
       '@saasmodels/api':
         specifier: workspace:*
         version: link:apps/api
+      '@saasmodels/contracts':
+        specifier: workspace:*
+        version: link:packages/contracts
       '@saasmodels/db':
         specifier: workspace:*
         version: link:packages/db
@@ -105,6 +108,9 @@ importers:
       '@node-rs/argon2':
         specifier: 2.2.2
         version: 2.2.2
+      '@saasmodels/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       dotenv:
         specifier: 18.0.8
         version: 18.0.8

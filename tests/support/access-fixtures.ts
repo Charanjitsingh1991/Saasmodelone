@@ -31,6 +31,8 @@ export type AccessFixtures = {
   closed: EmploymentFixture;
   deleted: EmploymentFixture;
   cancelled: EmploymentFixture;
+  employee: EmploymentFixture;
+  workHr: TenancyFixture;
   nonMemberUserId: string;
   suspendedMemberUserId: string;
 };
@@ -374,12 +376,35 @@ export async function createAccessFixtures(
     jurisdictionId,
     'c',
     '2022-04-01',
-    { role: 'employee' },
+    { role: 'hr' },
   );
   await grantModule(client, cancelled.tenantId, 'people', {
     status: 'cancelled',
     readUntil: new Date(Date.now() + 30 * DAY_MS),
   });
+
+  // Employee is intentionally permissionless in M0: role denial needs an
+  // entitled People membership to prove the entitlement check comes first.
+  const employee = await createEmploymentFixture(
+    client,
+    jurisdictionId,
+    'e',
+    '2024-04-01',
+    { role: 'employee' },
+  );
+  await grantModule(client, employee.tenantId, 'people');
+
+  // HR has People permissions but no Work permission, which separates the
+  // role check from the entitlement check.
+  const workHr = await createTenancyFixture(
+    client,
+    jurisdictionId,
+    'h',
+    '2024-05-01',
+    '2024-06-01',
+    { internal: true, role: 'hr' },
+  );
+  await grantModule(client, workHr.tenantId, 'work', { source: 'internal' });
 
   const nonMemberUserId = await insertAppUser(
     client,
@@ -401,6 +426,8 @@ export async function createAccessFixtures(
     closed,
     deleted,
     cancelled,
+    employee,
+    workHr,
     nonMemberUserId,
     suspendedMemberUserId,
   };

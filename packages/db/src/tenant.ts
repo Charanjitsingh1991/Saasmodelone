@@ -1,26 +1,21 @@
+import {
+  hasPermission,
+  MEMBERSHIP_ROLES,
+  permissionFor,
+  type MembershipRole,
+  type ModuleOperation,
+} from '@saasmodels/contracts';
 import { Pool, type PoolClient } from 'pg';
+
+export type { MembershipRole, ModuleOperation } from '@saasmodels/contracts';
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MODULE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,62}$/;
 
-const MEMBERSHIP_ROLES = [
-  'owner',
-  'admin',
-  'hr',
-  'finance',
-  'manager',
-  'employee',
-  'auditor',
-] as const;
-
 declare const runtimePoolBrand: unique symbol;
 
 export type RuntimePool = Pool & { readonly [runtimePoolBrand]: true };
-
-export type ModuleOperation = 'read' | 'write';
-
-export type MembershipRole = (typeof MEMBERSHIP_ROLES)[number];
 
 export type MemberContext = {
   role: MembershipRole;
@@ -68,6 +63,20 @@ export class ModuleAccessDeniedError extends Error {
   ) {
     super(message);
     this.name = 'ModuleAccessDeniedError';
+  }
+}
+
+export class RoleAccessDeniedError extends Error {
+  readonly code = 'ROLE_DENIED' as const;
+
+  constructor(
+    readonly module: string,
+    readonly operation: ModuleOperation,
+    readonly permission: string,
+    message = `Role is not permitted to ${operation} ${module}`,
+  ) {
+    super(message);
+    this.name = 'RoleAccessDeniedError';
   }
 }
 
@@ -132,8 +141,8 @@ function assertMembershipRole(value: string | null | undefined): MembershipRole 
 
 /**
  * System and background access only. This path checks the tenant and module
- * entitlements but not a user membership; request routes must use
- * withMemberTransaction.
+ * entitlements but not a user membership or role; request routes must use
+ * withMemberTransaction or they lose role enforcement.
  */
 export async function withTenantTransaction<T>(
   pool: RuntimePool,
@@ -181,6 +190,12 @@ export async function withTenantTransaction<T>(
   }
 }
 
+/**
+ * Member request access. Resolves membership, then tenant platform access, then
+ * the module entitlement, then the member role's permission, in that order.
+ * Any member route that reads or writes module data must pass a gate; an
+ * ungated call runs with no role authorization.
+ */
 export async function withMemberTransaction<T>(
   pool: RuntimePool,
   options: MemberTransactionOptions,
@@ -226,6 +241,17 @@ export async function withMemberTransaction<T>(
       const module = await client.query<{ allowed: boolean }>(check, [gate.module]);
       if (!oneAllowed(module.rows)) {
         throw new ModuleAccessDeniedError(gate.module, gate.operation);
+      }
+
+      // The entitlement check comes first so an unentitled module never
+      // discloses which roles could use it.
+      const permission = permissionFor(gate.module, gate.operation);
+      if (!permission || !hasPermission(member.role, permission)) {
+        throw new RoleAccessDeniedError(
+          gate.module,
+          gate.operation,
+          permission ?? `${gate.module}.${gate.operation}`,
+        );
       }
     }
 

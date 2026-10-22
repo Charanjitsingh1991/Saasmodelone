@@ -23,6 +23,7 @@
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@saasmodels/api": "workspace:*",
+    "@saasmodels/contracts": "workspace:*",
     "@saasmodels/db": "workspace:*",
     "@saasmodels/testkit": "workspace:*",
     "@saasmodels/worker": "workspace:*",

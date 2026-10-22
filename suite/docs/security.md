@@ -38,7 +38,7 @@ Threats we design against first:
 - Cross-tenant foreign keys are prevented with composite `(tenant_id, id)` references.
 - Tenant context is cleared when a pooled connection is returned.
 - Automated table-level tests prove the restrictive module policies on the two M0 proof tables, `employment` (People) and `project` (Work): entitled access, denial for an unentitled module on an entitled tenant, denial for suspended, closed and deleted tenants holding an active entitlement, denial of cross-tenant reads and writes, and read-only access for a cancelled entitlement inside `read_until`. The matrix expands with each runtime table grant; it does not yet cover every tenant table.
-- The API and worker share one tenant transaction. For request routes, the only source of tenant identity is the server-side session record resolved from the `saas_session` cookie; no header, query string, body or other cookie is trusted for it, and the raw token is never stored. Request routes use `withMemberTransaction`: both IDs are validated, `app.tenant_id` and `app.user_id` are set transaction-locally, and an active membership role is resolved before platform access and the module gate. A non-member or suspended member receives `MEMBERSHIP_DENIED` before tenant state is disclosed; a member of a suspended, closed or deleted tenant receives `PLATFORM_ACCESS_DENIED`. The worker uses `withTenantTransaction`, which is system-only and does not check membership. Email/password login, opaque hashed sessions and one-time invitation acceptance exist; MFA, OAuth, password reset, email delivery, session rotation, device lists, a distributed rate limiter and authentication-event audit do not. Role and scope enforcement is not built, and `/v1/context` returning a role is not authorization.
+- The API and worker share one tenant transaction. For request routes, the only source of tenant identity is the server-side session record resolved from the `saas_session` cookie; no header, query string, body or other cookie is trusted for it, and the raw token is never stored. Request routes use `withMemberTransaction`: both IDs are validated, `app.tenant_id` and `app.user_id` are set transaction-locally, and an active membership role is resolved before platform access, the module gate and the role permission. A non-member or suspended member receives `MEMBERSHIP_DENIED` before tenant state is disclosed; a member of a suspended, closed or deleted tenant receives `PLATFORM_ACCESS_DENIED`. The worker uses `withTenantTransaction`, which is system-only and does not check membership. Email/password login, opaque hashed sessions and one-time invitation acceptance exist; MFA, OAuth, password reset, email delivery, session rotation, device lists, a distributed rate limiter and authentication-event audit do not. Role enforcement covers the two M0 gated modules (see §5); scope enforcement is not built, and `/v1/context` output is informational rather than an authorization decision.
 - Tenant provisioning is an owner-only library and CLI, never an API route. It creates the tenant, owner user, owner membership, entitlements and a `tenant.provisioned` audit event in one transaction, and prints only IDs. The runtime role has no `INSERT` on `tenant`. Invitation creation is also an owner-only CLI, not an API route. Login is scoped to a supplied tenant slug; there is no cross-tenant email discovery or tenant switching.
 - `FORCE ROW LEVEL SECURITY` is not enabled in a migration. A readiness test temporarily forces it on `tenant`, proves that provisioning still sets `app.tenant_id` before the tenant insert, and resets it. Global reference tables and `infra.schema_migration` are never forced.
 
@@ -46,7 +46,7 @@ Threats we design against first:
 
 - The module catalog (`platform_module`, `platform_module_dependency`) is reference data. The runtime role can read it and cannot write it.
 - Each tenant has `module_entitlement` rows for licensed modules, with status, seat unit, start/end dates and contract reference. RLS scopes entitlements to the tenant. `read_until` is set if and only if the entitlement is cancelled; it is null for every other state.
-- Authorization order is **entitlement → role → scope**. A user with the right role in the wrong module is still denied.
+- Authorization order is **entitlement → role → scope**. A user with the right role in the wrong module is still denied. M0 implements the entitlement and role checks in the request path; scope is M1.
 - Module access has one database definition, split by operation: `app.has_module_read('<code>')` and `app.has_module_write('<code>')`, both security-definer. Every module helper first requires `app.has_platform_access()`: a tenant context is set and the tenant is active and not deleted. Write requires a trialing/active entitlement inside its window; read additionally allows suspended entitlements inside their original term and cancelled entitlements inside `read_until`. Post-term retention is `cancelled` plus `read_until`, never a stale suspension. Public tenants can use only `available`/`preview` catalog modules; `planned` modules require `tenant.is_internal` and an internal-source entitlement. `app.has_active_module('<code>')` is the exact delegate to the write helper, kept for compatibility; new SQL uses the read/write helpers, and no helper is ever called with `'core'` or `'switch'`.
 - Module tables carry `as restrictive` RLS policies installed by the idempotent, owner-only procedure `app.apply_module_policies()`; the runtime role has no `EXECUTE` on it. Switch staging is gated by `app.has_switch_access()` — any trialing/active licensable entitlement inside its window and an active tenant — never by a Switch entitlement.
 - `tenant.is_internal` is set only by the provisioning path; the runtime role has no `UPDATE` on `tenant`.
@@ -67,7 +67,7 @@ Implemented in M0:
 - Opaque sessions: 32 random bytes carried in an `HttpOnly`, `SameSite=Strict`, `Path=/` cookie, `Secure` when configured, with a 12-hour absolute expiry. Only the SHA-256 hash is stored. Logout requires the session's CSRF token and revokes only the presented session.
 - One-time invitations created by the owner-only `db:invite` CLI, hashed at rest, 7-day default expiry (1–30 days). Creation revokes older unconsumed invitations for the same membership. Acceptance activates the invited membership and creates a session in one transaction. A first-time invitee sets a password; an already-active user invited to a second tenant keeps and verifies its existing password, which is never replaced. Acceptance is rejected if the user is active but has no password, or if the password does not match.
 - State-changing requests require an exact `Origin` match. Login is rate-limited in memory per process by source address and additionally per email; invitation acceptance is rate-limited per source address. The limiter uses the observed socket address, so behind a proxy without `trustProxy` all clients share the proxy address; it is not a distributed limiter and not a replacement for edge protection.
-- Every login creates one session. A session proves identity only; it does not authorize a role or scope.
+- Every login creates one session. A session proves identity only and grants no action by itself: each member request resolves the membership role server-side, and a module gate requires both the entitlement and the role permission. Scope authorization is not built.
 
 Target controls, not built:
 
@@ -79,12 +79,35 @@ Target controls, not built:
 
 ## 5. Authorization
 
-- Role + scope checks on the server for every action, after the module entitlement check.
-- Sensitive permissions are explicit: payroll finalise, bank change, role change, export, delete, connector credentials.
+Implemented in M0:
+
+- Server-side role authorization after the module entitlement check. `withMemberTransaction` resolves the active membership role, checks platform access, checks the module entitlement, then checks the role permission before the route callback. The order is fixed: an unentitled module never discloses which roles could use it.
+- The policy is shared code in `@saasmodels/contracts`: `MEMBERSHIP_ROLES`, `PERMISSIONS`, `permissionsForRole`, `hasPermission` and `permissionFor`. It covers the two M0 gated modules, People and Work, and fails closed for an unknown role, an unknown permission or an unmapped module/operation pair.
+- M0 matrix (✓ = allowed):
+
+| Role | People read | People write | Work read | Work write |
+| --- | --- | --- | --- | --- |
+| owner | ✓ | ✓ | ✓ | ✓ |
+| admin | ✓ | ✓ | ✓ | ✓ |
+| hr | ✓ | ✓ | | |
+| finance | ✓ | | ✓ | |
+| manager | ✓ | | ✓ | ✓ |
+| employee | | | | |
+| auditor | ✓ | | ✓ | |
+
+- `employee` is intentionally empty: self-scope needs a person-to-user link and is deferred to M1.
+- A role that holds the permission for an entitled module proceeds; an entitled module with a role that lacks the permission returns `ROLE_DENIED` with the permission name and no data; an unentitled module returns `MODULE_NOT_ENTITLED` regardless of role.
+- `/v1/context` reports the role's permissions in canonical order, including permissions for modules the tenant has not licensed, plus only the effective modules where the database entitlement and the role permission both allow the operation. Context output is informational; the server repeats the check on every request.
+- Authenticated access denials are audited as `authorization.denied` (see §7). The audit is best-effort and cannot turn a denial into an allow.
+
+Target controls, not built:
+
+- Scope authorization (legal entity, department, project, client) and employee self-scope. These are M1; M0 enforces entitlement and role only.
+- Role administration API or UI, custom roles, seat enforcement and per-entity licensing.
+- Sensitive permissions beyond the four M0 module permissions: payroll finalise, bank change, role change, export, delete and connector credentials.
 - Four-eyes approval for payroll finalisation and bank-detail changes above a configurable threshold.
-- Client contacts are a separate principal type with document-room-only access.
-- Every denied request is logged with the actor, action and reason, including a denied module entitlement.
-- A module administrator can administer one module without becoming a tenant owner.
+- Client contacts as a separate principal type with document-room-only access.
+- A module administrator who can administer one module without becoming a tenant owner.
 
 ## 6. Sensitive data
 
@@ -99,9 +122,11 @@ Target controls, not built:
 
 - Append-only `audit_event` table; updates and deletes are blocked by trigger for the owner and tenant roles alike.
 - The runtime role has `INSERT` only on `audit_event`; it has no `SELECT`, `UPDATE` or `DELETE`. `appendAuditEvent` takes the tenant from `app.tenant_id`, never from a caller argument, uses parameters and has no `RETURNING`.
-- Captured in M0: tenant provisioning, entitlement grant and cancellation. Authentication, role changes, payroll, bank changes, exports, connector credentials, document downloads and tenant settings are target events, not yet implemented.
+- Captured in M0: tenant provisioning, entitlement grant and cancellation, and authenticated access denials. Authentication, role changes, payroll, bank changes, exports, connector credentials, document downloads and tenant settings are target events, not yet implemented.
+- An authenticated access denial is one `authorization.denied` row with `entity_type = 'request'`, no entity ID, actor type `user` and the session's user, IP and user agent. Metadata carries `reason`, `method` and the registered route `path`; `module` and `operation` are added when known, and `permission` only for a role denial. Reasons are exactly `MEMBERSHIP_DENIED`, `PLATFORM_ACCESS_DENIED`, `MODULE_NOT_ENTITLED` and `ROLE_DENIED`.
+- The denial path uses the route template, never the raw URL, and metadata excludes role, email, tenant slug, headers, cookies, tokens, query strings, request bodies and stack traces. Unauthenticated requests, unknown errors, CSRF/Origin failures and rate-limit rejections are not access denials and are not audited by this path.
+- Denial audit is best-effort: it opens its own runtime transaction because platform access or membership may be exactly what failed, so it cannot reuse the check it is recording. If the audit insert fails, the failure is logged and the original denial response is still returned. This is deliberately different from privileged business actions, where an audit write failure rolls back the action; that rollback is tested for an employment insert.
 - Audit events include actor, action, entity, before/after where appropriate, IP, user agent and timestamp.
-- Audit write failure rolls back the underlying privileged action; this is tested for an employment insert.
 - Audit retention is defined per jurisdiction; legal holds are explicit.
 - Audit logs are not editable by tenant admins. An audit read API and UI are not built.
 
@@ -141,13 +166,13 @@ Before the first real dataset is imported:
 - [ ] Tenant isolation tests pass for every table.
 - [ ] Entitlement tests pass: no access to an unlicensed, expired or cancelled module; no dependency leak.
 - [ ] Invitation, login, logout and session-expiry paths exercised against a disposable database; MFA, password reset, email delivery and edge rate limiting configured.
-- [ ] Role and scope authorization implemented. A valid session alone grants no action.
+- [ ] Role and scope authorization implemented for every action. M0 role authorization covers People and Work only; scope authorization and employee self-scope remain open. A valid session alone grants no action.
 - [ ] DPA and security schedule signed.
 - [ ] Named security owner and incident contact exchanged.
 - [ ] Read-only source credentials verified; no write scope.
 - [ ] Encryption keys and secret storage configured for production.
 - [ ] Backup and restore drill completed.
-- [ ] Audit events verified for login, import, payroll and export.
+- [ ] Audit events verified for login, import, payroll, export and authenticated access denials.
 - [ ] Access review completed for the design-partner workspace.
 - [ ] Migration rehearsal completed on synthetic or redacted data.
 - [ ] Rollback and export rehearsed with the customer watching.
