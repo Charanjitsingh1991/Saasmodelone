@@ -11,6 +11,7 @@ import Fastify, {
   type FastifyRequest,
 } from 'fastify';
 import {
+  appendAuditEvent,
   AuthError,
   findSession,
   InvalidTenantContextError,
@@ -31,6 +32,20 @@ import {
   type SessionRecord,
   type RuntimePool,
 } from '@saasmodels/db';
+import {
+  csvRecord,
+  PEOPLE_EXPORT_COLUMNS,
+  PEOPLE_EXPORT_HEADER,
+} from './csv.js';
+import { writeWithBackpressure } from './csv-stream.js';
+
+export {
+  csvField,
+  csvRecord,
+  PEOPLE_EXPORT_COLUMNS,
+  PEOPLE_EXPORT_HEADER,
+} from './csv.js';
+export { ClientClosedError, writeWithBackpressure } from './csv-stream.js';
 
 export const SESSION_COOKIE = 'saas_session';
 export const CSRF_HEADER = 'x-csrf-token';
@@ -52,6 +67,7 @@ export type CreateServerOptions = {
   loginIpRateLimit?: RateLimitOptions;
   loginRateLimit?: RateLimitOptions;
   invitationRateLimit?: RateLimitOptions;
+  exportBatchSize?: number;
   enableProofRoutes?: boolean;
   logger?: boolean;
 };
@@ -60,6 +76,16 @@ type ContextModule = {
   code: string;
   canRead: boolean;
   canWrite: boolean;
+};
+
+type PersonExportRow = {
+  person_id: string;
+  employee_code: string | null;
+  first_name: string;
+  last_name: string | null;
+  display_name: string;
+  work_email: string | null;
+  phone: string | null;
 };
 
 type AccessErrorBody = {
@@ -182,6 +208,13 @@ function secretsEqual(left: string, right: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+function validateExportBatchSize(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > 1000) {
+    throw new Error('exportBatchSize must be an integer between 1 and 1000');
+  }
+  return value;
+}
+
 function validateRateLimit(options: RateLimitOptions, name: string): RateLimitOptions {
   if (
     !Number.isInteger(options.max) ||
@@ -268,6 +301,7 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
     options.invitationRateLimit ?? DEFAULT_RATE_LIMIT,
     'invitationRateLimit',
   );
+  const exportBatchSize = validateExportBatchSize(options.exportBatchSize ?? 200);
   const loginIpAllowed = createRateLimiter(loginIpLimit);
   const loginAllowed = createRateLimiter(loginLimit);
   const invitationAllowed = createRateLimiter(invitationLimit);
@@ -485,6 +519,116 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
     } catch (error) {
       return await accessError(pool, error, request, reply, session);
     }
+  });
+
+  app.get('/v1/people/export', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+
+    const gate = { module: 'people', operation: 'read' } as const;
+
+    // The audit row must be durable before any CSV byte is disclosed. A
+    // failure here sends a sanitized 500 and no download.
+    try {
+      await withMemberTransaction(
+        pool,
+        { tenantId: session.tenantId, userId: session.userId, gate },
+        async (client) => {
+          await appendAuditEvent(client, {
+            action: 'people.directory.exported',
+            entityType: 'tenant',
+            entityId: session.tenantId,
+            actorType: 'user',
+            actorUserId: session.userId,
+            metadata: {
+              module: 'people',
+              format: 'csv',
+              columns: [...PEOPLE_EXPORT_COLUMNS],
+            },
+            ip: request.ip,
+            userAgent: request.headers['user-agent'] ?? null,
+          });
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+
+    let hijacked = false;
+
+    try {
+      await withMemberTransaction(
+        pool,
+        { tenantId: session.tenantId, userId: session.userId, gate },
+        async (client) => {
+          // The cursor is declared before headers so a query failure can still
+          // produce a typed denial or error response.
+          await client.query(
+            `declare people_export no scroll cursor for
+               select id as person_id,
+                      employee_code,
+                      first_name,
+                      last_name,
+                      display_name,
+                      work_email::text as work_email,
+                      phone
+                 from person
+                where deleted_at is null
+                order by employee_code nulls last, id`,
+          );
+
+          reply.hijack();
+          hijacked = true;
+          const today = new Date().toISOString().slice(0, 10);
+          reply.raw.writeHead(200, {
+            'content-type': 'text/csv; charset=utf-8',
+            'content-disposition': `attachment; filename="people-directory-${today}.csv"`,
+            'cache-control': 'no-store',
+            'x-content-type-options': 'nosniff',
+          });
+
+          await writeWithBackpressure(reply.raw, PEOPLE_EXPORT_HEADER);
+
+          for (;;) {
+            const batch = await client.query<PersonExportRow>(
+              `fetch forward ${exportBatchSize} from people_export`,
+            );
+            if (batch.rows.length === 0) {
+              break;
+            }
+            let chunk = '';
+            for (const row of batch.rows) {
+              chunk += csvRecord([
+                row.person_id,
+                row.employee_code,
+                row.first_name,
+                row.last_name,
+                row.display_name,
+                row.work_email,
+                row.phone,
+              ]);
+            }
+            await writeWithBackpressure(reply.raw, chunk);
+          }
+
+          await client.query('close people_export');
+          reply.raw.end();
+        },
+      );
+    } catch (error) {
+      if (hijacked || reply.raw.headersSent) {
+        request.log.error(error);
+        if (!reply.raw.destroyed) {
+          reply.raw.destroy();
+        }
+        return reply;
+      }
+      return await accessError(pool, error, request, reply, session);
+    }
+
+    return reply;
   });
 
   if (enableProofRoutes) {

@@ -15,7 +15,7 @@ The goal is not coverage theatre. It is confidence that payroll is correct, tena
 | Entitlement | Module gating, expiry, cancellation, dependency degradation | Every commit |
 | Migration fixture | Source sample → staging → reconciliation → promotion → export | Every commit for fixtures; nightly for large fixtures |
 | End-to-end | Critical user journeys in a browser | Every pull request to main |
-| Security regression | Cross-tenant access, role matrix, export permissions | Every commit |
+| Security regression | Cross-tenant access, role matrix, export authorization | Every commit |
 | Restore drill | Backup restores within RPO/RTO | Monthly and before a design partner goes live |
 
 No mocks for the database in isolation or migration tests. A mocked tenant filter has already passed in systems that later leaked.
@@ -41,6 +41,7 @@ Also test:
 - A pooled connection does not leak tenant context between requests.
 - A composite foreign key cannot point at another tenant's parent.
 - Search, exports, scheduled reports and background jobs are tenant-scoped.
+- The M0 People directory export returns only the session tenant's rows; a `tenant_id` query parameter or `x-tenant-id` header cannot change the result. Direct SQL under the column-level runtime grant returns only A rows with tenant A context, only B rows with tenant B, and none when the tenant setting is unset.
 
 ### 2.2 Module entitlements
 
@@ -56,6 +57,8 @@ Entitlements are a security boundary, not a billing detail.
 8. Retire a module in the catalog; assert it cannot be newly entitled but existing entitlements follow the documented migration path.
 9. Turn off an optional dependency (for example CRM while Work is active); assert the dependent feature is hidden or degrades with an explanation, and does not read unlicensed data.
 10. Repeat through the API and the UI, not only SQL.
+
+For the M0 People directory export: a Work-only tenant receives `MODULE_NOT_ENTITLED`, an employee in a People-entitled tenant receives `ROLE_DENIED`, and neither response contains a CSV header or row. A cancelled People entitlement inside its `read_until` window still exports for a role holding `people.read`.
 
 Test the catalog seed twice: it must be idempotent and must not overwrite reviewed metadata.
 
@@ -129,7 +132,8 @@ Test the ugly cases: blank rows, duplicate tax-ID/email, Unicode names, Excel da
 - Every authenticated access denial appends exactly one `authorization.denied` row with the session actor, IP, user agent, reason, registered route template and any known module/operation/permission. The raw query string, role, email, tenant slug, headers, cookies, tokens and bodies are absent. A missing or random session, an unknown error and a successful request append no denial row.
 - Denial audit is best-effort: a failing audit write is logged and the original 403 denial is still returned. Privileged business actions remain fail-closed: an audit failure rolls back the action, tested for an employment insert.
 - A finalised payroll run cannot be edited; reversal produces new records.
-- Role changes, exports, login failures and connector credential changes are target audit events, not yet implemented.
+- A successful People directory export appends exactly one `people.directory.exported` row before the first CSV byte, with the session actor, tenant entity, request IP and user agent, and metadata limited to module, format and columns. No CSV is sent when that audit insert fails: the request returns a sanitized 500.
+- Role changes, login success/failure, logout, invitation events, imports, payroll events and connector credential changes are target audit events, not yet implemented. Other export paths do not exist.
 - Domain events are delivered at least once and consumers are idempotent.
 
 ### 2.7 Request layer
@@ -146,6 +150,7 @@ The API and worker share one tenant transaction helper, and the same suites prov
 - Reusing one pool for sequential tenants and users does not leak `app.tenant_id`, `app.user_id` or the resolved role.
 - A denied gate or a failed callback rolls back; a callback error persists nothing.
 - Each authenticated access denial appends exactly one `authorization.denied` row. The registered route template is stored, never a query string; metadata contains no role, email, tenant slug, header, cookie, token, body or stack. A denial is still returned when the audit write fails.
+- `GET /v1/people/export` is registered in production even when proof routes are disabled. It takes the principal only from the session, applies the People read gate in the member transaction and streams through a server-side cursor. It sends `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and no `Content-Length`; a gate denial returns the typed code with no CSV; `x-tenant-id` and a `tenant_id` parameter are ignored.
 
 These suites use the real database, the runtime and auth roles, real Argon2 verification and real cookies, not mocks. They sit above the table-level denial suite. Scope enforcement, employee self-scope, role administration and seat enforcement are still not implemented.
 
@@ -165,12 +170,16 @@ These suites use the real database, the runtime and auth roles, real Argon2 veri
 
 ### 2.9 Export and portability
 
+Target behaviour, not built:
+
 - A full export includes every entitled module, document metadata and file objects.
 - A per-module export includes exactly that module plus the shared directory records it needs, and nothing from an unentitled module.
 - A cancelled module's records can still be exported for the contracted retention window.
 - Re-importing the export into a clean tenant reproduces the same control totals.
 - An export cannot include data from another tenant.
 - Expired signed URLs fail.
+
+Implemented in M0: `GET /v1/people/export` streams a seven-field People directory CSV for the session tenant, gated by `people.read`, with a column-level runtime grant and a pre-disclosure audit event. It has no filters, column selection, date ranges or other query parameters; no client or Work data; no employment, salary, tax-identifier, bank or personal-contact fields; no stored artifact, background job, signed URL or export history; no re-import; no dedicated export permission; and no export rate limit. It is a scoped directory export, not a complete data export or portability feature.
 
 ### 2.10 Standalone module acceptance
 
@@ -206,6 +215,21 @@ Covered by `tests/authentication.test.ts` against disposable PostgreSQL with the
 
 Not covered yet: browser login and invitation screens (none exist), email delivery, password reset, MFA, OAuth, session rotation, device lists, distributed rate limiting and authentication-event audit.
 
+### 2.12 People directory export (M0)
+
+`tests/csv.test.ts`, `tests/csv-stream.test.ts` and `tests/people-export.test.ts` cover:
+
+- The CSV helper: exact header, null and empty values, commas, quotes, LF and CRLF newlines, Unicode, all six formula-leading characters (`=`, `+`, `-`, `@`, tab, CR), prefixing only at the start of a field, doubled quotes and CRLF records.
+- The streaming writer: immediate write, waiting for `drain`, and rejection when the response is closed, destroyed or errored.
+- A successful export with `exportBatchSize: 2`: 200, exact headers and exact ordered body for multiple people across multiple `FETCH` batches, with comma, quote, newline and formula-like values; no BOM and no `Content-Length`.
+- Tenant isolation: tenant B's person and a soft-deleted person never appear; `?tenant_id=B` and `x-tenant-id: B` are ignored; direct SQL under the column-level runtime grant returns only A rows under tenant A, only B rows under tenant B, and none with the tenant setting unset.
+- Denials: employee `ROLE_DENIED`, Work-only tenant `MODULE_NOT_ENTITLED`, and unauthenticated 401; none carries a CSV header or row, and a denial writes no export audit event.
+- A cancelled People entitlement inside `read_until` with the HR role returns 200.
+- Forbidden fields: a person carrying `personal_email`, `date_of_birth`, `gender`, `designation`, `status`, `employment_type` and `legal_entity_id` exports only the seven identity fields, and none of those values appears in the CSV.
+- Audit: exactly one `people.directory.exported` row per success, with actor, IP, user agent and metadata limited to `{ module, format, columns }`; no query string, header, cookie, token, tenant slug, role, email address or person data. Revoking runtime `INSERT` on `audit_event` produces a sanitized 500 with no CSV and no additional audit row.
+- Runtime privileges: `has_column_privilege` is true for exactly the eight granted person columns and false for `tenant_id`, personal contact, date of birth, gender, status, designation and the employment columns; table-level `SELECT` is false.
+- The route works with proof routes disabled, and invalid `exportBatchSize` values are rejected.
+
 ---
 
 ## 3. Test data
@@ -229,6 +253,7 @@ A merge is blocked when any of these fail:
 - Authentication and session suite: login, invitation acceptance, cookie attributes, session expiry/revocation, CSRF/Origin checks and the auth-role privilege matrix.
 - Authorization matrix: the exact seven-role policy, role denial after entitlement, entitlement-before-role ordering, and `/v1/context` permissions and effective modules.
 - Denied-request audit: one `authorization.denied` row per authenticated access denial, no query/header/token leakage, and a denial still returned when the audit write fails.
+- People directory export: exact streaming CSV, formula-injection guarding, tenant isolation and override attempts, entitlement and role denials with no bytes, soft-delete exclusion, forbidden-field exclusion, pre-disclosure audit, audit-failure 500 and column-level runtime grants.
 - Payroll golden cases for the current and previous rule-pack versions in every covered jurisdiction.
 - Migration fixture → reconciliation → promotion → export.
 - Dependency audit with no unapproved critical vulnerability.

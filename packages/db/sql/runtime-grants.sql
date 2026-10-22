@@ -31,6 +31,15 @@ grant select, insert, update, delete on table
   public.project
 to saas_runtime;
 
+-- People directory export. These are the only person columns the runtime may
+-- read. deleted_at is used solely to exclude soft-deleted rows and is never
+-- exported. RLS remains the tenant boundary; every other person column stays
+-- owner-only.
+grant select (
+  id, employee_code, first_name, last_name, display_name,
+  work_email, phone, deleted_at
+) on table public.person to saas_runtime;
+
 -- Append-only audit writer. No SELECT, UPDATE or DELETE is granted.
 grant insert on table public.audit_event to saas_runtime;
 

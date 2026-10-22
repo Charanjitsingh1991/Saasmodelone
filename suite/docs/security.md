@@ -40,6 +40,7 @@ Threats we design against first:
 - Automated table-level tests prove the restrictive module policies on the two M0 proof tables, `employment` (People) and `project` (Work): entitled access, denial for an unentitled module on an entitled tenant, denial for suspended, closed and deleted tenants holding an active entitlement, denial of cross-tenant reads and writes, and read-only access for a cancelled entitlement inside `read_until`. The matrix expands with each runtime table grant; it does not yet cover every tenant table.
 - The API and worker share one tenant transaction. For request routes, the only source of tenant identity is the server-side session record resolved from the `saas_session` cookie; no header, query string, body or other cookie is trusted for it, and the raw token is never stored. Request routes use `withMemberTransaction`: both IDs are validated, `app.tenant_id` and `app.user_id` are set transaction-locally, and an active membership role is resolved before platform access, the module gate and the role permission. A non-member or suspended member receives `MEMBERSHIP_DENIED` before tenant state is disclosed; a member of a suspended, closed or deleted tenant receives `PLATFORM_ACCESS_DENIED`. The worker uses `withTenantTransaction`, which is system-only and does not check membership. Email/password login, opaque hashed sessions and one-time invitation acceptance exist; MFA, OAuth, password reset, email delivery, session rotation, device lists, a distributed rate limiter and authentication-event audit do not. Role enforcement covers the two M0 gated modules (see §5); scope enforcement is not built, and `/v1/context` output is informational rather than an authorization decision.
 - Tenant provisioning is an owner-only library and CLI, never an API route. It creates the tenant, owner user, owner membership, entitlements and a `tenant.provisioned` audit event in one transaction, and prints only IDs. The runtime role has no `INSERT` on `tenant`. Invitation creation is also an owner-only CLI, not an API route. Login is scoped to a supplied tenant slug; there is no cross-tenant email discovery or tenant switching.
+- The People directory export (`GET /v1/people/export`) is the first production module route. It is gated by `withMemberTransaction` with `{ module: 'people', operation: 'read' }`, so entitlement and role both apply, and tenant scope comes from `app.tenant_id` and RLS. The runtime role has column-level `SELECT` on seven identity fields plus `deleted_at`, and no table-level `SELECT` on `person`; personal contact, demographic, status, employment and statutory columns remain owner-only. The route commits a `people.directory.exported` audit row before the first CSV byte; an audit failure returns a sanitized 500 with no bytes. It reads through a server-side cursor in batches, honours backpressure, rolls back on client close, and prefixes formula-like leading characters before RFC 4180 quoting.
 - `FORCE ROW LEVEL SECURITY` is not enabled in a migration. A readiness test temporarily forces it on `tenant`, proves that provisioning still sets `app.tenant_id` before the tenant insert, and resets it. Global reference tables and `infra.schema_migration` are never forced.
 
 ## 3. Module entitlements
@@ -51,7 +52,7 @@ Threats we design against first:
 - Module tables carry `as restrictive` RLS policies installed by the idempotent, owner-only procedure `app.apply_module_policies()`; the runtime role has no `EXECUTE` on it. Switch staging is gated by `app.has_switch_access()` — any trialing/active licensable entitlement inside its window and an active tenant — never by a Switch entitlement.
 - `tenant.is_internal` is set only by the provisioning path; the runtime role has no `UPDATE` on `tenant`.
 - Tenant-level suspension, closure and soft deletion are denied at both layers: `app.has_platform_access()` at the request layer, and every module RLS policy through the module helpers.
-- Cancellation and expiry remove access but never delete module data. Read/export access for a cancelled module is an explicit retention decision, not a side effect of the entitlement being absent.
+- Cancellation and expiry remove access but never delete module data. Read/export access for a cancelled module is an explicit retention decision, not a side effect of the entitlement being absent. The People directory export follows `has_module_read`, so a cancelled People entitlement inside `read_until` can still export; outside that window the route returns `MODULE_NOT_ENTITLED`.
 - Entitlement changes go through the owner-only `grantEntitlement` / `cancelEntitlement` library, never the API. Grant upserts an `active` (the default) or `trialing` entitlement, clears a previous `read_until`, preserves `created_by` and validates the same catalog rules as provisioning. A `trialing` entitlement requires an explicit `endsAt` after `startsAt`; open-ended trials are rejected. A public tenant may use `contract` or `trial` sources only; source `internal` requires `tenant.is_internal`. Cancel requires an existing entitlement, sets `cancelled` plus a future `read_until`, keeps the original start/end dates, never deletes data and allows extending an existing retention window.
 - Entitlement changes are audited with actor, module, previous state and new state. Contract references are deliberately excluded from audit snapshots; cancellation reasons live in audit metadata only. The runtime role can read entitlements but cannot change them.
 - Membership roles resolve through `app.current_member_role()`, a security-definer helper pinned to the current tenant and user. The runtime role has no `SELECT` on `membership`, `app_user` or `tenant`. The stored role is validated against the seven allowed values in the request layer; an unknown value is a data-integrity error and is never treated as a permissive default.
@@ -104,7 +105,7 @@ Target controls, not built:
 
 - Scope authorization (legal entity, department, project, client) and employee self-scope. These are M1; M0 enforces entitlement and role only.
 - Role administration API or UI, custom roles, seat enforcement and per-entity licensing.
-- Sensitive permissions beyond the four M0 module permissions: payroll finalise, bank change, role change, export, delete and connector credentials.
+- Sensitive permissions beyond the four M0 module permissions: payroll finalise, bank change, role change, a dedicated export permission, delete and connector credentials. The M0 People directory export is gated by `people.read`; it does not add or imply a dedicated export permission, which is M1.
 - Four-eyes approval for payroll finalisation and bank-detail changes above a configurable threshold.
 - Client contacts as a separate principal type with document-room-only access.
 - A module administrator who can administer one module without becoming a tenant owner.
@@ -116,16 +117,17 @@ Target controls, not built:
 - PII is redacted from logs, traces and error reports by default.
 - Production data never enters development or test environments. Fixtures are synthetic.
 - Document uploads are quarantined, scanned and served via short-lived signed URLs.
-- Exports are encrypted, time-limited and audited.
+- The M0 People directory export is audited before disclosure, sent with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, and buffered nowhere server-side beyond the cursor batch. It has no signed URL, stored object, encryption-at-rest layer or time-limited link; those remain target controls for file exports.
 
 ## 7. Audit
 
 - Append-only `audit_event` table; updates and deletes are blocked by trigger for the owner and tenant roles alike.
 - The runtime role has `INSERT` only on `audit_event`; it has no `SELECT`, `UPDATE` or `DELETE`. `appendAuditEvent` takes the tenant from `app.tenant_id`, never from a caller argument, uses parameters and has no `RETURNING`.
-- Captured in M0: tenant provisioning, entitlement grant and cancellation, and authenticated access denials. Authentication, role changes, payroll, bank changes, exports, connector credentials, document downloads and tenant settings are target events, not yet implemented.
+- Captured in M0: tenant provisioning, entitlement grant and cancellation, authenticated access denials, and People directory exports. Authentication, role changes, payroll, bank changes, connector credentials, document downloads and tenant settings are target events, not yet implemented; other export paths do not exist.
 - An authenticated access denial is one `authorization.denied` row with `entity_type = 'request'`, no entity ID, actor type `user` and the session's user, IP and user agent. Metadata carries `reason`, `method` and the registered route `path`; `module` and `operation` are added when known, and `permission` only for a role denial. Reasons are exactly `MEMBERSHIP_DENIED`, `PLATFORM_ACCESS_DENIED`, `MODULE_NOT_ENTITLED` and `ROLE_DENIED`.
 - The denial path uses the route template, never the raw URL, and metadata excludes role, email, tenant slug, headers, cookies, tokens, query strings, request bodies and stack traces. Unauthenticated requests, unknown errors, CSRF/Origin failures and rate-limit rejections are not access denials and are not audited by this path.
 - Denial audit is best-effort: it opens its own runtime transaction because platform access or membership may be exactly what failed, so it cannot reuse the check it is recording. If the audit insert fails, the failure is logged and the original denial response is still returned. This is deliberately different from privileged business actions, where an audit write failure rolls back the action; that rollback is tested for an employment insert.
+- A People directory export writes one `people.directory.exported` row with entity type `tenant`, the session tenant ID and actor user, plus the request IP and user agent. Metadata is limited to module, format and the exported column names; it carries no row count, query string, header, cookie, token, email address or person data. The row is committed in its own member transaction, under the same People read gate, before response headers or CSV bytes are sent. If that audit write fails, the export is refused with a sanitized 500 and no download. The streaming transaction rechecks the gate so an entitlement change between the two transactions is still denied; it writes no second event.
 - Audit events include actor, action, entity, before/after where appropriate, IP, user agent and timestamp.
 - Audit retention is defined per jurisdiction; legal holds are explicit.
 - Audit logs are not editable by tenant admins. An audit read API and UI are not built.
@@ -149,7 +151,7 @@ Target controls, not built:
 - Retention and deletion schedules per record class, with legal-hold exceptions.
 - Data subject requests supported through the customer's administrator and the studio.
 - Breach notification runbook with defined owners and timelines.
-- Customer data is exportable in CSV/JSON plus original documents.
+- Customer data is exportable in CSV/JSON plus original documents. Target; M0 provides only the scoped People directory identity CSV, not the full export or original documents.
 
 ## 10. AI policy
 
@@ -172,7 +174,7 @@ Before the first real dataset is imported:
 - [ ] Read-only source credentials verified; no write scope.
 - [ ] Encryption keys and secret storage configured for production.
 - [ ] Backup and restore drill completed.
-- [ ] Audit events verified for login, import, payroll, export and authenticated access denials.
+- [ ] Audit events verified for login, import, payroll, export and authenticated access denials. M0 covers authenticated access denials and the People directory export; login, import, payroll and other export events do not exist yet.
 - [ ] Access review completed for the design-partner workspace.
 - [ ] Migration rehearsal completed on synthetic or redacted data.
 - [ ] Rollback and export rehearsed with the customer watching.

@@ -4,11 +4,30 @@ import type { MembershipRole } from '@saasmodels/db';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+export type PersonRowFixture = {
+  id: string;
+  employeeCode: string | null;
+  firstName: string;
+  lastName: string | null;
+  displayName: string;
+  workEmail: string | null;
+  phone: string | null;
+  personalEmail: string | null;
+  dateOfBirth: string | null;
+  gender: string | null;
+  designation: string | null;
+  status: string;
+  employmentType: string | null;
+  legalEntityId: string | null;
+  deletedAt: Date | null;
+};
+
 export type EmploymentFixture = {
   tenantId: string;
   userId: string;
   role: MembershipRole;
   personId: string;
+  person: PersonRowFixture;
   legalEntityId: string;
   employmentId: string;
   employmentStartDate: string;
@@ -33,6 +52,8 @@ export type AccessFixtures = {
   cancelled: EmploymentFixture;
   employee: EmploymentFixture;
   workHr: TenancyFixture;
+  exportPeople: PersonRowFixture[];
+  softDeletedPerson: PersonRowFixture;
   nonMemberUserId: string;
   suspendedMemberUserId: string;
 };
@@ -146,22 +167,72 @@ async function insertLegalEntity(
   return row.id;
 }
 
+type PersonInput = {
+  employeeCode?: string | null;
+  firstName: string;
+  lastName?: string | null;
+  displayName: string;
+  workEmail?: string | null;
+  phone?: string | null;
+  personalEmail?: string | null;
+  dateOfBirth?: string | null;
+  gender?: string | null;
+  designation?: string | null;
+  status?: string;
+  employmentType?: string | null;
+  legalEntityId?: string | null;
+  deletedAt?: Date | null;
+};
+
 async function insertPerson(
   client: Client,
   tenantId: string,
-  label: string,
-): Promise<string> {
-  const result = await client.query<{ id: string }>(
-    `insert into person (tenant_id, first_name, display_name, work_email)
-     values ($1, 'Ada', $2, $3)
-     returning id`,
-    [tenantId, `Person ${label}`, `${label}_${suffix()}@example.test`],
+  input: PersonInput,
+): Promise<PersonRowFixture> {
+  const result = await client.query<PersonRowFixture>(
+    `insert into person
+       (tenant_id, employee_code, first_name, last_name, display_name, work_email,
+        phone, personal_email, date_of_birth, gender, designation, status,
+        employment_type, legal_entity_id, deleted_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+     returning id,
+               employee_code as "employeeCode",
+               first_name as "firstName",
+               last_name as "lastName",
+               display_name as "displayName",
+               work_email::text as "workEmail",
+               phone,
+               personal_email::text as "personalEmail",
+               date_of_birth::text as "dateOfBirth",
+               gender,
+               designation,
+               status,
+               employment_type as "employmentType",
+               legal_entity_id as "legalEntityId",
+               deleted_at as "deletedAt"`,
+    [
+      tenantId,
+      input.employeeCode ?? null,
+      input.firstName,
+      input.lastName ?? null,
+      input.displayName,
+      input.workEmail ?? null,
+      input.phone ?? null,
+      input.personalEmail ?? null,
+      input.dateOfBirth ?? null,
+      input.gender ?? null,
+      input.designation ?? null,
+      input.status ?? 'active',
+      input.employmentType ?? null,
+      input.legalEntityId ?? null,
+      input.deletedAt ?? null,
+    ],
   );
   const row = result.rows[0];
   if (!row) {
-    throw new Error(`Could not create the person for ${label}`);
+    throw new Error(`Could not create the person ${input.displayName}`);
   }
-  return row.id;
+  return row;
 }
 
 async function insertEmployment(
@@ -268,11 +339,15 @@ async function createEmploymentFixture(
     options.membershipStatus ?? 'active',
   );
   const legalEntityId = await insertLegalEntity(client, tenantId, label, jurisdictionId);
-  const personId = await insertPerson(client, tenantId, label);
+  const person = await insertPerson(client, tenantId, {
+    firstName: 'Ada',
+    displayName: `Person ${label}`,
+    workEmail: `${label}_${suffix()}@example.test`,
+  });
   const employmentId = await insertEmployment(
     client,
     tenantId,
-    personId,
+    person.id,
     legalEntityId,
     startDate,
   );
@@ -280,7 +355,8 @@ async function createEmploymentFixture(
     tenantId,
     userId,
     role,
-    personId,
+    personId: person.id,
+    person,
     legalEntityId,
     employmentId,
     employmentStartDate: startDate,
@@ -343,6 +419,49 @@ export async function createAccessFixtures(
 
   await grantModule(client, a.tenantId, 'people');
   await grantModule(client, b.tenantId, 'work', { source: 'internal' });
+
+  // Directory rows with controlled values: quoting, embedded CRLF, formula
+  // prefixes, nulls and fields the export must never read.
+  const exportPeople = [
+    await insertPerson(client, a.tenantId, {
+      employeeCode: 'EXP-001',
+      firstName: 'Ada',
+      lastName: 'Lovelace',
+      displayName: 'Ada, "Countess"',
+      workEmail: `export_ada_${suffix()}@example.test`,
+      phone: '+1 555 0100',
+      personalEmail: `secret_personal_${suffix()}@example.test`,
+      dateOfBirth: '1980-01-02',
+      gender: 'female',
+      designation: 'Secret Designation',
+      status: 'probation',
+      employmentType: 'contract',
+      legalEntityId: a.legalEntityId,
+    }),
+    await insertPerson(client, a.tenantId, {
+      employeeCode: 'EXP-002',
+      firstName: 'Grace',
+      lastName: 'Hopper',
+      displayName: 'Line\r\nBreak',
+      workEmail: `export_grace_${suffix()}@example.test`,
+      phone: '=1+1',
+    }),
+    await insertPerson(client, a.tenantId, {
+      employeeCode: 'EXP-003',
+      firstName: 'Alan',
+      displayName: '@SUM(A1,A2)',
+      workEmail: null,
+      phone: null,
+    }),
+  ];
+
+  const softDeletedPerson = await insertPerson(client, a.tenantId, {
+    employeeCode: 'EXP-999',
+    firstName: 'Deleted',
+    displayName: 'Soft Deleted Person',
+    workEmail: `export_deleted_${suffix()}@example.test`,
+    deletedAt: new Date(),
+  });
 
   const suspended = await createEmploymentFixture(
     client,
@@ -428,6 +547,8 @@ export async function createAccessFixtures(
     cancelled,
     employee,
     workHr,
+    exportPeople,
+    softDeletedPerson,
     nonMemberUserId,
     suspendedMemberUserId,
   };

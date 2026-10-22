@@ -126,8 +126,8 @@ When an optional module is not licensed, dependent modules show a plain director
 ### Deactivation and portability
 
 - Suspending a module stops writes and background jobs, not access to the customer's data.
-- Cancelling a module keeps its data readable and exportable for the contractual retention window.
-- Export is per module and for the whole organisation. A customer can leave with one module's data without buying the others.
+- Cancelling a module keeps its data readable and exportable for the contractual retention window. M0 proves the read window for the People directory export.
+- Target: export is per module and for the whole organisation. A customer can leave with one module's data without buying the others. M0 ships only a scoped People directory identity CSV; full module and organisation export, file objects and re-import are not built.
 - Imported provenance and audit events survive module cancellation; they are not deleted to make a churn metric look better.
 
 ---
@@ -203,11 +203,17 @@ M0 implements entitlement and role authorization; scope is M1.
 - **Entitlement** answers whether the organisation has licensed the module at all. The request path checks it first, so an unentitled module never discloses role policy.
 - **Role** answers what kind of action is allowed within an entitled module. The policy lives in `@saasmodels/contracts` and is applied by `withMemberTransaction`. The M0 roles are owner, admin, hr, finance, manager, employee and auditor. Owner and admin hold all four People/Work permissions; HR holds People read/write; finance and auditor hold People read and Work read; manager holds People read and Work read/write; employee holds none until self-scope is designed in M1.
 - **Scope** answers where: legal entity, department, client, project. Not built.
-- **Sensitive actions** (payroll finalise, bank change, data export, role change) require an explicit permission and are always audited. Beyond the four M0 module permissions, they are not built.
+- **Sensitive actions** (payroll finalise, bank change, data export, role change) require an explicit permission and are always audited. M0 audits its one data export, `GET /v1/people/export`, and gates it with `people.read`; a dedicated export permission, payroll finalise, bank change and role change are not built.
 - A person's manager may see team leave and timesheets, but not salary, bank details or statutory identifiers. Target.
 - Client contacts never use internal roles; they access only a document room through a separate principal type. Target.
 
 Authorization is checked on the server for every request; when scope authorization lands it will also constrain the query shape (for example, filtering by permitted project IDs). UI hiding is not authorization. A gated route that skips `withMemberTransaction` loses the role check; `withTenantTransaction` is system-only. Authenticated access denials are recorded as `authorization.denied` (see `security.md` §7).
+
+### M0 People directory export
+
+`GET /v1/people/export` is the first production data export and is always registered, independent of proof routes. It takes the tenant and user only from the session and opens a member transaction with the People read gate. A first transaction writes one `people.directory.exported` audit row and commits before any response header is sent; a failure there returns a sanitized 500 and no CSV. A second member transaction rechecks the gate and streams a `NO SCROLL` cursor in validated batches, honouring backpressure and rolling back if the client closes. The response is RFC 4180 CSV with exactly seven identity columns: `person_id`, `employee_code`, `first_name`, `last_name`, `display_name`, `work_email` and `phone`. It carries `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, omits `Content-Length` and stores no artifact.
+
+Tenant scope comes from RLS, not from a caller value. The runtime role has column-level `SELECT` on those seven columns plus `deleted_at`, which is used only to exclude soft-deleted rows and is never exported; every other person column, including personal contact, date of birth, gender, status, designation and employment data, remains owner-only. There is no UI, filter, column selection, date range, background job, signed URL, export history, dedicated export permission or export rate limit. See `security.md` §6 and `testing.md` §2.12.
 
 ---
 
@@ -233,7 +239,7 @@ Documents are content-addressed objects with metadata in Postgres:
 - Metadata: entity type/id, filename, MIME, size, checksum, version, retention date, scan status.
 - Access is through short-lived signed URLs after an authorization check, never a public bucket.
 - A document can attach to a person, client, project, contract, invoice or payroll run without duplication.
-- Export includes metadata and file objects in an open archive, even when only one module is licensed.
+- A full export (target, not built) includes metadata and file objects in an open archive, even when only one module is licensed. The M0 People directory export includes no documents.
 
 ---
 
@@ -255,7 +261,7 @@ Key properties:
 - Promotion is idempotent by `(tenant_id, source_system, source_id)`.
 - Reconciliation compares control totals, not just row counts.
 - Cutover is reversible until the first production payroll is finalised.
-- Export is always available, including after a failed migration.
+- Export is always available, including after a failed migration. Target; M0 provides only the scoped People directory export.
 - The migration plan names its target module. Importing people does not require buying CRM, and importing clients does not require buying People.
 
 See [`adr/0003-migration-staging-and-promotion.md`](adr/0003-migration-staging-and-promotion.md).
