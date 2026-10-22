@@ -24,7 +24,7 @@ Exit criteria:
 - A test proves that two tenants cannot read or write each other's rows through both SQL and the API.
 - A test proves that a tenant without an active module cannot reach its data, routes, exports or background jobs.
 - A test proves suspended, closed and deleted tenants are denied at both layers: `app.has_platform_access()` and the module RLS policies.
-- A synthetic tenant can be provisioned with People, then have CRM enabled, without a schema change or data migration.
+- A synthetic public tenant can be provisioned with People; an internal tenant can also receive the planned CRM module through an internal-source entitlement, without a schema change or data migration.
 - Migrations and the module seed apply cleanly to an empty database and roll forward from the previous version.
 - A signed-in user can reach an empty People screen and sees only the modules the tenant is entitled to.
 

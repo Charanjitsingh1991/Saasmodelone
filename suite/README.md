@@ -3,7 +3,7 @@
 This directory is the engineering project for **SaaSModels One**, the commercial product. It is deliberately separate from the marketing site at the repository root.
 
 > Status: **M0 foundation** · October 2026
-> The database, access helpers and a minimal API/worker request layer exist. Identity, roles, scopes, audit, production routes and queues are not implemented.
+> The database, access helpers, a minimal API/worker request layer, membership verification and audited provisioning/entitlements exist. Identity, sessions, role/scope enforcement, production routes, queues, audit read APIs and UI are not implemented.
 
 ## First slice
 
@@ -44,6 +44,7 @@ suite/
       0006_migration.sql     import batches, mapping, rows, issues, reconciliation
       0007_modules.sql       module catalog, dependencies, tenant entitlements
       0008_platform_access.sql  access helpers, read retention, module RLS policies
+      0009_member_access.sql    active membership role helper
     seed/
       0001_modules.sql       idempotent module catalog and dependency seed
 ```
@@ -67,33 +68,38 @@ Target: PostgreSQL 16+ (17 recommended), `pgcrypto` and `citext`, in the data re
 pnpm db:bootstrap   # roles and database, once
 pnpm db:migrate     # checksummed migrations; reapplies the runtime grants
 pnpm db:seed        # idempotent module catalog
+pnpm db:provision --name "Synthetic Co" --slug synthetic-co --region test-region \
+  --owner-email owner@example.test --owner-name "Synthetic Owner" --module people
 ```
 
-The module catalog is reference data, seeded once and updated by migration. A tenant is then granted entitlements; the catalog itself is not writable by the runtime role.
+The module catalog is reference data, seeded once and updated by migration. A tenant is then granted entitlements; the catalog itself is not writable by the runtime role. Provisioning and entitlement changes run through owner-only libraries and audit in the same transaction.
 
-The migrations and seed are applied by the repository harness against a real local PostgreSQL 17 instance, with fresh-apply, checksum, role-privilege, access-helper and RLS policy tests. PostgreSQL 16 in CI is planned for T10, and a restore drill is still required before real data — see `db/README.md` and `docs/roadmap.md`.
+The migrations and seed are applied by the repository harness against a real local PostgreSQL 17 instance, with fresh-apply, checksum, role-privilege, access-helper, RLS policy, membership, provisioning and audit suites. PostgreSQL 16 in CI is planned for T10, and a restore drill is still required before real data — see `db/README.md` and `docs/roadmap.md`.
 
-The application connects as a role that does **not** own the tables. Tenant context is set per transaction:
+The application connects as a role that does **not** own the tables. Tenant and user context are set per transaction:
 
 ```sql
 set local app.tenant_id = '<tenant-uuid>';
+set local app.user_id = '<user-uuid>';
 ```
 
-RLS denies all rows when the setting is absent. Tenant provisioning and pre-tenant membership discovery use a separate privileged path, not the runtime role.
+RLS denies all rows when the tenant setting is absent. Request routes resolve membership through `withMemberTransaction`; the worker uses the system-only `withTenantTransaction`. Tenant provisioning is owner-only and never reachable from the API.
 
 ## Application skeleton
 
-`apps/api` and `apps/worker` contain the first request layer. Both use the shared `withTenantTransaction` helper from `@saasmodels/db`: the tenant comes only from the injected principal, the platform and module checks run through the runtime role, and the caller's query runs in the same transaction. The API exposes `/health`, `/v1/context` and proof routes; the worker exports `runTenantJob` without a queue or polling loop.
+`apps/api` and `apps/worker` contain the first request layer. API routes use `withMemberTransaction` from `@saasmodels/db`: the tenant and user come only from the injected principal, both IDs are validated, the active membership role resolves first, then platform access and the module gate run through the runtime role, and the caller's query runs in the same transaction. The context route returns the resolved role. The worker exports `runTenantJob` on the system-only `withTenantTransaction` without a queue or polling loop.
 
-Proof routes are disabled by default and enabled only by tests. The executable API authenticator returns no principal and logs that identity is not configured, so `/health` is the only route that can succeed until real identity lands. Authentication, roles, scopes and audit are not implemented; do not treat this skeleton as a production authentication layer.
+Proof routes are disabled by default and enabled only by tests. The executable API authenticator returns no principal and logs that identity is not configured, so `/health` is the only route that can succeed until real identity lands. Authentication, sessions, invitations, role/scope enforcement and denied-request auditing are not implemented; do not treat this skeleton as a production authentication layer.
+
+Provisioning and entitlement changes are owner-only libraries used by the `db:provision` CLI. They are not routed through the API.
 
 ## What comes next
 
-1. Replace the API's null authenticator with real identity; organisation provisioning, memberships, role/scope authorization and audit follow.
+1. Replace the API's null authenticator with real identity, invitation acceptance and sessions; then add role/scope authorization and denied-request audit.
 2. Build the People vertical: person, employment, salary structure, payroll run, payslip.
 3. Build Switch against CSV first, then greytHR; prove reconciliation before adding a second connector.
 4. Put one design partner's migrated history through a sandbox rehearsal.
-5. Prove a second module can be enabled on the same tenant without a data migration; CRM is the first candidate because it shares the client directory.
+5. Prove second-module enablement on a public tenant once CRM leaves `planned`; M0 proves the same configuration path on an internal tenant with an internal-source entitlement.
 
 ## Related documents
 

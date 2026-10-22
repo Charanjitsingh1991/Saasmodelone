@@ -1,6 +1,7 @@
-import type { Pool, PoolClient } from 'pg';
+import type { PoolClient } from 'pg';
 import {
   withTenantTransaction,
+  type RuntimePool,
   type TenantGate,
 } from '@saasmodels/db';
 
@@ -13,7 +14,7 @@ export type TenantJob<T> = {
 };
 
 export async function runTenantJob<T>(
-  pool: Pool,
+  pool: RuntimePool,
   job: TenantJob<T>,
 ): Promise<T> {
   return withTenantTransaction(

@@ -38,9 +38,9 @@ Threats we design against first:
 - Cross-tenant foreign keys are prevented with composite `(tenant_id, id)` references.
 - Tenant context is cleared when a pooled connection is returned.
 - Automated table-level tests prove the restrictive module policies on the two M0 proof tables, `employment` (People) and `project` (Work): entitled access, denial for an unentitled module on an entitled tenant, denial for suspended, closed and deleted tenants holding an active entitlement, denial of cross-tenant reads and writes, and read-only access for a cancelled entitlement inside `read_until`. The matrix expands with each runtime table grant; it does not yet cover every tenant table.
-- The API and worker share one tenant transaction: the injected principal is the only source of tenant identity, and no header, query string, body or cookie is trusted for it. The platform check, module gate and data query use the same client and transaction, with `app.tenant_id` set transaction-locally. Authentication is not implemented yet, and role and scope checks are not built; the current principal is trusted for tenant identity only.
-- Tenant provisioning and login-time membership lookup use a narrow privileged path, audited separately.
-- `FORCE ROW LEVEL SECURITY` is not enabled yet. The `tenant` table gains it only when the provisioning path sets `app.tenant_id` before inserting the tenant row and that path is tested; global reference tables and `infra.schema_migration` are never forced.
+- The API and worker share one tenant transaction: the injected principal is the only source of tenant identity, and no header, query string, body or cookie is trusted for it. Request routes use `withMemberTransaction`: both IDs are validated, `app.tenant_id` and `app.user_id` are set transaction-locally, and an active membership role is resolved before platform access and the module gate. A non-member or suspended member receives `MEMBERSHIP_DENIED` before tenant state is disclosed; a member of a suspended, closed or deleted tenant receives `PLATFORM_ACCESS_DENIED`. The worker uses `withTenantTransaction`, which is system-only and does not check membership. Authentication, sessions, passwords and invitations are not implemented; the current principal is injected by the caller. Role and scope enforcement is not built, and `/v1/context` returning a role is not authorization.
+- Tenant provisioning is an owner-only library and CLI, never an API route. It creates the tenant, owner user, owner membership, entitlements and a `tenant.provisioned` audit event in one transaction, and prints only IDs. The runtime role has no `INSERT` on `tenant`. Login-time membership discovery is not built; the membership helper only resolves an already-supplied tenant and user.
+- `FORCE ROW LEVEL SECURITY` is not enabled in a migration. A readiness test temporarily forces it on `tenant`, proves that provisioning still sets `app.tenant_id` before the tenant insert, and resets it. Global reference tables and `infra.schema_migration` are never forced.
 
 ## 3. Module entitlements
 
@@ -52,7 +52,9 @@ Threats we design against first:
 - `tenant.is_internal` is set only by the provisioning path; the runtime role has no `UPDATE` on `tenant`.
 - Tenant-level suspension, closure and soft deletion are denied at both layers: `app.has_platform_access()` at the request layer, and every module RLS policy through the module helpers.
 - Cancellation and expiry remove access but never delete module data. Read/export access for a cancelled module is an explicit retention decision, not a side effect of the entitlement being absent.
-- Entitlement changes are audited with actor, module, previous state and new state.
+- Entitlement changes go through the owner-only `grantEntitlement` / `cancelEntitlement` library, never the API. Grant upserts an `active` (the default) or `trialing` entitlement, clears a previous `read_until`, preserves `created_by` and validates the same catalog rules as provisioning. A `trialing` entitlement requires an explicit `endsAt` after `startsAt`; open-ended trials are rejected. A public tenant may use `contract` or `trial` sources only; source `internal` requires `tenant.is_internal`. Cancel requires an existing entitlement, sets `cancelled` plus a future `read_until`, keeps the original start/end dates, never deletes data and allows extending an existing retention window.
+- Entitlement changes are audited with actor, module, previous state and new state. Contract references are deliberately excluded from audit snapshots; cancellation reasons live in audit metadata only. The runtime role can read entitlements but cannot change them.
+- Membership roles resolve through `app.current_member_role()`, a security-definer helper pinned to the current tenant and user. The runtime role has no `SELECT` on `membership`, `app_user` or `tenant`. The stored role is validated against the seven allowed values in the request layer; an unknown value is a data-integrity error and is never treated as a permissive default.
 - A dependency that is optional does not imply a licence: Work can run without CRM or People, and the UI must hide or degrade the dependent feature rather than leak data from an unlicensed module.
 - API tokens carry module scopes; a token cannot be used to call an unentitled module even if the role allows it.
 
@@ -86,11 +88,13 @@ Threats we design against first:
 
 ## 7. Audit
 
-- Append-only `audit_event` table; updates and deletes are blocked by trigger.
-- Captured: authentication, role/permission changes, payroll actions, bank changes, exports, connector credentials, document downloads by privileged users, tenant settings.
+- Append-only `audit_event` table; updates and deletes are blocked by trigger for the owner and tenant roles alike.
+- The runtime role has `INSERT` only on `audit_event`; it has no `SELECT`, `UPDATE` or `DELETE`. `appendAuditEvent` takes the tenant from `app.tenant_id`, never from a caller argument, uses parameters and has no `RETURNING`.
+- Captured in M0: tenant provisioning, entitlement grant and cancellation. Authentication, role changes, payroll, bank changes, exports, connector credentials, document downloads and tenant settings are target events, not yet implemented.
 - Audit events include actor, action, entity, before/after where appropriate, IP, user agent and timestamp.
+- Audit write failure rolls back the underlying privileged action; this is tested for an employment insert.
 - Audit retention is defined per jurisdiction; legal holds are explicit.
-- Audit logs are not editable by tenant admins.
+- Audit logs are not editable by tenant admins. An audit read API and UI are not built.
 
 ## 8. Infrastructure
 

@@ -3,12 +3,13 @@ import Fastify, {
   type FastifyReply,
   type FastifyRequest,
 } from 'fastify';
-import type { Pool } from 'pg';
 import {
   InvalidTenantContextError,
+  MembershipDeniedError,
   ModuleAccessDeniedError,
   PlatformAccessDeniedError,
-  withTenantTransaction,
+  withMemberTransaction,
+  type RuntimePool,
 } from '@saasmodels/db';
 
 export type Principal = {
@@ -19,7 +20,7 @@ export type Principal = {
 export type Authenticate = (request: FastifyRequest) => Promise<Principal | null>;
 
 export type CreateServerOptions = {
-  pool: Pool;
+  pool: RuntimePool;
   authenticate: Authenticate;
   enableProofRoutes?: boolean;
   logger?: boolean;
@@ -48,6 +49,10 @@ function accessError(error: unknown, reply: FastifyReply): AccessErrorBody {
   if (error instanceof InvalidTenantContextError) {
     reply.code(401);
     return { error: { code: 'UNAUTHENTICATED' } };
+  }
+  if (error instanceof MembershipDeniedError) {
+    reply.code(403);
+    return { error: { code: 'MEMBERSHIP_DENIED' } };
   }
   if (error instanceof PlatformAccessDeniedError) {
     reply.code(403);
@@ -84,10 +89,10 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
     }
 
     try {
-      return await withTenantTransaction(
+      return await withMemberTransaction(
         pool,
-        { tenantId: principal.tenantId },
-        async (client) => {
+        { tenantId: principal.tenantId, userId: principal.userId },
+        async (client, member) => {
           const switchAccess = await client.query<{ allowed: boolean }>(
             'select app.has_switch_access() as allowed',
           );
@@ -103,6 +108,7 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
           return {
             userId: principal.userId,
             tenantId: principal.tenantId,
+            role: member.role,
             switchAccess: switchAccess.rows[0]?.allowed ?? false,
             modules: modules.rows.filter((row) => row.canRead || row.canWrite),
           };
@@ -121,10 +127,11 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
       }
 
       try {
-        return await withTenantTransaction(
+        return await withMemberTransaction(
           pool,
           {
             tenantId: principal.tenantId,
+            userId: principal.userId,
             gate: { module: 'people', operation: 'read' },
           },
           async (client) => {
@@ -160,10 +167,11 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
       }
 
       try {
-        return await withTenantTransaction(
+        return await withMemberTransaction(
           pool,
           {
             tenantId: principal.tenantId,
+            userId: principal.userId,
             gate: { module: 'work', operation: 'read' },
           },
           async (client) => {

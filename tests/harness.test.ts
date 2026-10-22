@@ -48,7 +48,7 @@ afterAll(async () => {
 describe('local database harness', () => {
   test('fresh apply records every baseline migration and creates the schema', async () => {
     const expected = await listSqlFiles(migrationsDir);
-    expect(expected).toHaveLength(8);
+    expect(expected).toHaveLength(9);
 
     const result = await migrate({ ownerUrl: db().ownerUrl });
     expect(result.applied).toEqual(expected);
@@ -99,6 +99,7 @@ describe('local database harness', () => {
           'has_module_write',
           'has_switch_access',
           'apply_module_policies',
+          'current_member_role',
         ]),
       );
     } finally {
@@ -313,6 +314,7 @@ describe('runtime role privileges', () => {
         has_module_write: boolean;
         has_switch_access: boolean;
         apply_module_policies: boolean;
+        current_member_role: boolean;
       }>(`
         select
           has_function_privilege(current_user, 'app.current_tenant_id()', 'EXECUTE') as current_tenant,
@@ -324,7 +326,8 @@ describe('runtime role privileges', () => {
           has_function_privilege(current_user, 'app.has_module_read(text)', 'EXECUTE') as has_module_read,
           has_function_privilege(current_user, 'app.has_module_write(text)', 'EXECUTE') as has_module_write,
           has_function_privilege(current_user, 'app.has_switch_access()', 'EXECUTE') as has_switch_access,
-          has_function_privilege(current_user, 'app.apply_module_policies()', 'EXECUTE') as apply_module_policies
+          has_function_privilege(current_user, 'app.apply_module_policies()', 'EXECUTE') as apply_module_policies,
+          has_function_privilege(current_user, 'app.current_member_role()', 'EXECUTE') as current_member_role
       `);
       expect(routines.rows[0]).toEqual({
         current_tenant: true,
@@ -337,6 +340,7 @@ describe('runtime role privileges', () => {
         has_module_write: true,
         has_switch_access: true,
         apply_module_policies: false,
+        current_member_role: true,
       });
 
       const catalog = await client.query<{ count: string }>(

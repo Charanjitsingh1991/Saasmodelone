@@ -114,9 +114,12 @@ Test the ugly cases: blank rows, duplicate tax-ID/email, Unicode names, Excel da
 
 ### 2.6 Append-only and audit
 
-- `audit_event` update/delete attempts raise an error.
+- `audit_event` update/delete attempts raise an error for both the owner and the runtime role.
+- The runtime role can append an audit row for its own tenant only, and can never read, update or delete the audit trail.
+- The audit writer takes the tenant from `app.tenant_id`; an insert for another tenant is rejected by RLS.
+- Provisioning and entitlement grant/cancellation append before/after audit rows in the same transaction.
 - A finalised payroll run cannot be edited; reversal produces new records.
-- Role changes, exports, login failures and connector credential changes are audited.
+- Role changes, exports, login failures and connector credential changes are target audit events, not yet implemented.
 - Audit write failure rolls back the underlying privileged action.
 - Domain events are delivered at least once and consumers are idempotent.
 
@@ -124,16 +127,33 @@ Test the ugly cases: blank rows, duplicate tax-ID/email, Unicode names, Excel da
 
 The API and worker share one tenant transaction helper, and the same suites prove both surfaces:
 
-- The principal is injected by the caller; missing, malformed or unknown principals fail before data is read. No header, query string, body or cookie can supply a tenant.
-- Tenant context is transaction-local. The platform check and the module gate run on the same client and in the same transaction as the caller's query.
+- The principal is injected by the caller; missing or malformed principals fail before data is read. No header, query string, body or cookie can supply a tenant.
+- Request routes resolve an active membership before platform access. A non-member or suspended member receives `MEMBERSHIP_DENIED` even when the tenant is suspended, so tenant state is not disclosed. A member of a suspended, closed or deleted tenant receives `PLATFORM_ACCESS_DENIED`.
+- A user with a valid membership in tenant A cannot use that user ID with tenant B.
+- The resolved role is passed to the route callback and returned by `/v1/context`. An unknown stored role is a data-integrity error, never a permissive default. Role and scope enforcement is not implemented yet.
+- Tenant and user context are transaction-local. The membership check, platform check, module gate and caller's query run on the same client and in the same transaction.
 - Every module route and job declares a read or write gate; an unentitled operation returns a stable denial code and no rows.
 - Attempts to override the tenant with `x-tenant-id` or a `tenant_id` parameter return only the principal's records.
-- Reusing one pool for sequential tenants does not leak `app.tenant_id`.
+- Reusing one pool for sequential tenants and users does not leak `app.tenant_id`, `app.user_id` or the resolved role.
 - A denied gate or a failed callback rolls back; a callback error persists nothing.
 
-These suites use the real database and the runtime role, not mocks. They sit above the table-level denial suite; authentication, roles and scopes are not implemented yet.
+These suites use the real database and the runtime role, not mocks. They sit above the table-level denial suite; authentication, sessions and authorization are not implemented yet.
 
-### 2.8 Export and portability
+### 2.8 Provisioning, membership and entitlements
+
+- Provisioning is owner-only. It creates the tenant, owner user, owner membership, initial entitlements and audit event in one transaction.
+- Input validation rejects empty or malformed names, slugs, regions, emails, module lists and duplicate module codes.
+- A duplicate slug returns `TENANT_SLUG_TAKEN` and leaves no second tenant, user or audit row.
+- Module rules: unknown codes, non-licensable modules, retired modules and planned modules for public tenants are rejected. An internal tenant can receive a planned module only with an internal-source entitlement.
+- An existing invited or active user is reused without changing its status or display name; a disabled or suspended user cannot become an owner.
+- A failed provisioning attempt rolls back the whole transaction, including the tenant row.
+- Provisioning succeeds while `tenant` has `FORCE ROW LEVEL SECURITY`, proving that `app.tenant_id` is set before the tenant insert. The test resets FORCE in a `finally` block; no migration enables it.
+- The membership matrix covers owner, admin and employee roles; no membership; suspended membership; cross-tenant user; unset tenant or user; and a member of a suspended, closed or deleted tenant.
+- The runtime role cannot read or write `membership`, cannot read or write `tenant` (including `is_internal`), and cannot read `app_user`.
+- Entitlement grant, cancellation, reactivation and retention extension are tested with before/after audit snapshots. Contract references never enter audit rows; cancellation reasons appear only in audit metadata.
+- Entitlement errors are stable: missing tenant, ineligible actor, invalid dates, missing entitlement, unknown module, non-licensable module and unavailable module.
+
+### 2.9 Export and portability
 
 - A full export includes every entitled module, document metadata and file objects.
 - A per-module export includes exactly that module plus the shared directory records it needs, and nothing from an unentitled module.
@@ -142,7 +162,7 @@ These suites use the real database and the runtime role, not mocks. They sit abo
 - An export cannot include data from another tenant.
 - Expired signed URLs fail.
 
-### 2.9 Standalone module acceptance
+### 2.10 Standalone module acceptance
 
 Every licensable module must pass the same test before it is sold alone:
 

@@ -1,11 +1,13 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import type { Client } from 'pg';
+import type { MembershipRole } from '@saasmodels/db';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export type EmploymentFixture = {
   tenantId: string;
   userId: string;
+  role: MembershipRole;
   personId: string;
   legalEntityId: string;
   employmentId: string;
@@ -29,12 +31,17 @@ export type AccessFixtures = {
   closed: EmploymentFixture;
   deleted: EmploymentFixture;
   cancelled: EmploymentFixture;
+  nonMemberUserId: string;
+  suspendedMemberUserId: string;
 };
 
 type TenantOptions = {
   status?: string;
   deleted?: boolean;
   internal?: boolean;
+  role?: MembershipRole;
+  membershipStatus?: string;
+  userStatus?: string;
 };
 
 type ModuleOptions = {
@@ -83,6 +90,39 @@ async function insertTenant(
     throw new Error(`Could not create tenant ${label}`);
   }
   return row.id;
+}
+
+async function insertAppUser(
+  client: Client,
+  email: string,
+  displayName: string,
+  status = 'active',
+): Promise<string> {
+  const result = await client.query<{ id: string }>(
+    `insert into app_user (email, display_name, status)
+     values ($1, $2, $3)
+     returning id`,
+    [email, displayName, status],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error(`Could not create the user ${email}`);
+  }
+  return row.id;
+}
+
+async function insertMembership(
+  client: Client,
+  tenantId: string,
+  userId: string,
+  role: MembershipRole,
+  status = 'active',
+): Promise<void> {
+  await client.query(
+    `insert into membership (tenant_id, user_id, role, status)
+     values ($1, $2, $3, $4)`,
+    [tenantId, userId, role, status],
+  );
 }
 
 async function insertLegalEntity(
@@ -211,6 +251,20 @@ async function createEmploymentFixture(
   options: TenantOptions = {},
 ): Promise<EmploymentFixture> {
   const tenantId = await insertTenant(client, label, options);
+  const role = options.role ?? 'owner';
+  const userId = await insertAppUser(
+    client,
+    `${label}_${suffix()}@example.test`,
+    `User ${label}`,
+    options.userStatus ?? 'active',
+  );
+  await insertMembership(
+    client,
+    tenantId,
+    userId,
+    role,
+    options.membershipStatus ?? 'active',
+  );
   const legalEntityId = await insertLegalEntity(client, tenantId, label, jurisdictionId);
   const personId = await insertPerson(client, tenantId, label);
   const employmentId = await insertEmployment(
@@ -222,7 +276,8 @@ async function createEmploymentFixture(
   );
   return {
     tenantId,
-    userId: randomUUID(),
+    userId,
+    role,
     personId,
     legalEntityId,
     employmentId,
@@ -281,7 +336,7 @@ export async function createAccessFixtures(
     'b',
     '2023-05-01',
     '2024-03-01',
-    { internal: true },
+    { internal: true, role: 'admin' },
   );
 
   await grantModule(client, a.tenantId, 'people');
@@ -319,11 +374,34 @@ export async function createAccessFixtures(
     jurisdictionId,
     'c',
     '2022-04-01',
+    { role: 'employee' },
   );
   await grantModule(client, cancelled.tenantId, 'people', {
     status: 'cancelled',
     readUntil: new Date(Date.now() + 30 * DAY_MS),
   });
 
-  return { a, b, suspended, closed, deleted, cancelled };
+  const nonMemberUserId = await insertAppUser(
+    client,
+    `nonmember_${suffix()}@example.test`,
+    'Non-member user',
+  );
+
+  const suspendedMemberUserId = await insertAppUser(
+    client,
+    `suspendedmember_${suffix()}@example.test`,
+    'Suspended member user',
+  );
+  await insertMembership(client, a.tenantId, suspendedMemberUserId, 'employee', 'suspended');
+
+  return {
+    a,
+    b,
+    suspended,
+    closed,
+    deleted,
+    cancelled,
+    nonMemberUserId,
+    suspendedMemberUserId,
+  };
 }

@@ -31,6 +31,9 @@ grant select, insert, update, delete on table
   public.project
 to saas_runtime;
 
+-- Append-only audit writer. No SELECT, UPDATE or DELETE is granted.
+grant insert on table public.audit_event to saas_runtime;
+
 revoke all on all sequences in schema public from public;
 revoke all on all sequences in schema public from saas_runtime;
 
@@ -43,6 +46,8 @@ grant execute on function app.has_module_write(text) to saas_runtime;
 grant execute on function app.has_switch_access() to saas_runtime;
 -- Compatibility alias; an exact delegate to has_module_write.
 grant execute on function app.has_active_module(text) to saas_runtime;
+-- Resolves the membership role without granting SELECT on public.membership.
+grant execute on function app.current_member_role() to saas_runtime;
 
 -- The policy installer is owner-only. The blanket revoke above already covers
 -- it; this line keeps that contract explicit.
