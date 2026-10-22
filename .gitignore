@@ -9,4 +9,5 @@ playwright-report/
 test-results/
 *.log
 pgdata/
+var/
 .DS_Store

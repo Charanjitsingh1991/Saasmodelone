@@ -141,7 +141,7 @@ Target controls, not built:
 - Encryption in transit (TLS 1.2+) and at rest.
 - Least-privilege infrastructure roles; no long-lived production credentials in CI.
 - Secrets in a managed store with rotation; never in Git.
-- Backups encrypted, tested with scheduled restore drills. Not built in M0.
+- Backups encrypted, tested with scheduled restore drills. Not built in M0. A manually executed logical `pg_dump`/`pg_restore` drill (`pnpm drill:restore`, `testing.md` §2.14) verified restore parity once on local PostgreSQL 17.9 with synthetic data; encryption, scheduling, WAL/PITR, retained or offsite copies and any CI or PostgreSQL 16 coverage of restore are not built.
 - Repository verification is authored but not yet exercised on GitHub. [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) declares push and pull-request runs on PostgreSQL 16 and 17 with read-only repository permissions, a frozen lockfile, `pnpm secret-scan`, `pnpm audit --prod --audit-level high`, typecheck, lint, boundary lint, bootstrap, migrate twice, seed twice, the test suite, Chromium installation and the browser journey, whose Playwright webServer builds the web app before serving it. There is no Git remote, so the workflow has never run; PostgreSQL 16 compatibility and the CI browser job are unproven.
 - `scripts/secret-scan.ts` scans tracked and untracked non-ignored regular files for private-key blocks, common cloud/token formats, literal session-cookie values and sensitive file paths. It does not scan Git history, ignored files, packed objects or remote state, and it reports matches without printing them. `tests/secret-scan.test.ts` covers the rules, tracked and untracked discovery, ignored and binary skipping, and redaction.
 - `tests/schema-inventory.test.ts` is the executable record of the schema boundary: 66 public tables with `tenant_id`, 64 with RLS, exactly `auth_session` and `invitation` without RLS, no `FORCE RLS`, and the exact runtime table and person-column grants.
@@ -179,7 +179,7 @@ Before the first real dataset is imported:
 - [ ] Named security owner and incident contact exchanged.
 - [ ] Read-only source credentials verified; no write scope.
 - [ ] Encryption keys and secret storage configured for production.
-- [ ] Backup and restore drill completed.
+- [ ] Backup and restore drill completed. Left unticked because the executed drill (`pnpm drill:restore`) is a one-off logical dump and restore of synthetic local data; it does not cover the scheduled, encrypted, retained backup regime this gate means.
 - [ ] Audit events verified for login, import, payroll, export and authenticated access denials. M0 covers authenticated access denials and the People directory export; login, import, payroll and other export events do not exist yet.
 - [ ] Access review completed for the design-partner workspace.
 - [ ] Migration rehearsal completed on synthetic or redacted data.

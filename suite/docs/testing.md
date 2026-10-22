@@ -16,7 +16,7 @@ The goal is not coverage theatre. It is confidence that payroll is correct, tena
 | Migration fixture | Source sample → staging → reconciliation → promotion → export | Every commit for fixtures; nightly for large fixtures |
 | End-to-end | Critical user journeys in a browser | One Playwright journey locally against the built shell, disposable PostgreSQL and an in-process API; declared in CI, never executed there |
 | Security regression | Cross-tenant access, role matrix, export authorization | Every commit |
-| Restore drill | Backup restores within RPO/RTO | Monthly and before a design partner goes live |
+| Restore drill | Logical dump and restore parity (`pnpm drill:restore`) | Executed manually against the local developer database; the RPO/RTO target below and a monthly schedule are not built |
 
 No mocks for the database in isolation or migration tests. A mocked tenant filter has already passed in systems that later leaked.
 
@@ -250,6 +250,12 @@ Not covered yet by this API suite: the browser journey covers sign-in and sign-o
 - A keyboard-only sign-in reaches a Work-only workspace, shows Work but not People, and opening `/app/people` shows the access state rather than the directory shell.
 
 The journey is one test, not a full regression suite. It does not cover the distinct `429` sign-in message (covered only by the login-mapping unit tests), the post-sign-in `401` that clears in-memory state (no test; code inspection only), invitation acceptance, password reset, session expiry while a request is in flight, a People data-entry flow (none exists), export UI (none exists), other module screens (none exist), real proxy/edge deployment, CSP or assistive-technology testing.
+
+### 2.14 Backup and restore drill (M0)
+
+`pnpm drill:restore` (`scripts/restore-drill.ts`) is run manually against the local developer database and needs the PostgreSQL 17 client binaries (default `D:/tools/pg17/pgsql/bin`, overridable with `PG_BIN_DIR`). It takes a `pg_dump --format=custom` backup into the gitignored `var/backups` with a timestamped filename, records the dump's byte size and SHA-256, creates a throwaway `saasmodels_drill_<timestamp>` database, restores the dump into it with `pg_restore`, and compares source and restored on: public base-table count; row counts of the load-bearing tenant, identity, membership, entitlement, catalog, directory, employment, project, session, invitation, audit and event tables; RLS-enabled table and policy counts; the exact runtime table-grant and person-column-grant inventory that `tests/schema-inventory.test.ts` asserts; and a runtime-role query under a set `app.tenant_id` that must return the same counts on both sides. Any mismatch fails loudly; the drill database is always dropped and the source database is never a restore target — the script refuses to run if the target would equal the source name. `tests/restore-drill.test.ts` exercises the comparison logic against a real disposable database: two collections of the same database report no differences, and inserting one tenant row makes the check fail with the exact divergent count, without re-running pg_dump.
+
+What the drill proves: one logical dump of the current schema and synthetic data restores with full parity on the local PostgreSQL 17.9 developer database. What it does not prove: WAL archiving, point-in-time recovery, encryption at rest or in transit, retained or offsite copies, any schedule or RPO/RTO, and anything on PostgreSQL 16 or in CI. It is not part of `pnpm test` or the CI workflow.
 
 ---
 

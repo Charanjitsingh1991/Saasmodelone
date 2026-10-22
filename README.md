@@ -29,6 +29,8 @@ pnpm test
 
 The migration runner refuses to continue when an applied file's checksum changes, when a migration was interrupted, or when it previously failed. Reviewed migrations are never rewritten; add a forward migration instead.
 
+`pnpm drill:restore` runs the backup-and-restore drill against the local developer database when PostgreSQL 17 client binaries are installed (default `D:/tools/pg17/pgsql/bin`, overridable with `PG_BIN_DIR`): a custom-format `pg_dump` into gitignored `var/backups` with its size and SHA-256 recorded, a restore into a throwaway `saasmodels_drill_<timestamp>` database, a parity check of table counts, load-bearing row counts, RLS and policy counts, the runtime grant inventory and a runtime-role query under `app.tenant_id`, then the drop of the drill database. The source database is read-only to the drill and is never a restore target. It proves one logical local restore on synthetic data only — no schedule, encryption, PITR or CI coverage. See [suite/docs/testing.md](suite/docs/testing.md) §2.14.
+
 ## Web app
 
 The M0 client is a React 19 + Vite single-page app in `apps/web`. Run the API and the web server in two terminals:

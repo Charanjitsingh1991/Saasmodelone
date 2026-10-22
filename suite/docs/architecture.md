@@ -325,7 +325,7 @@ Initial topology (single region, selected at organisation provisioning):
 | Secrets | Managed secret store / KMS | No secrets in environment files committed to Git |
 | Observability | Structured logs, metrics, traces, error tracking | PII redaction before export |
 
-Backups: point-in-time recovery with a documented RPO of 15 minutes and RTO of 4 hours for the first cohort. Restore drills are scheduled, not assumed.
+Backups: point-in-time recovery with a documented RPO of 15 minutes and RTO of 4 hours for the first cohort. Restore drills are scheduled, not assumed. **Target, not built:** M0 has no WAL archiving, PITR or schedule. What exists is a manually executed logical `pg_dump`/`pg_restore` drill (`pnpm drill:restore`) verified once on local PostgreSQL 17.9 against synthetic data, with no encryption, no retained or offsite copies and no RPO/RTO guarantee.
 
 The first data region is chosen with the first design partner. Additional regions are added only when a real residency requirement exists; the product does not claim multi-region operation before it is deployed.
 
