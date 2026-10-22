@@ -17,6 +17,7 @@
     "db:migrate": "node --import tsx packages/db/src/cli.ts migrate",
     "db:seed": "node --import tsx packages/db/src/cli.ts seed",
     "db:provision": "node --import tsx packages/db/src/cli.ts provision",
+    "db:invite": "node --import tsx packages/db/src/cli.ts invite",
     "db:setup": "pnpm db:bootstrap && pnpm db:migrate && pnpm db:seed"
   },
   "devDependencies": {

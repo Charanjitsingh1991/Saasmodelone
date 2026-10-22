@@ -12,25 +12,31 @@ pnpm db:migrate
 pnpm db:seed
 pnpm db:provision --name "Synthetic Co" --slug synthetic-co --region test-region \
   --owner-email owner@example.test --owner-name "Synthetic Owner" --module people
+pnpm db:invite --tenant synthetic-co --email owner@example.test --days 7
 ```
 
 Every file is wrapped in a transaction. Do not edit an applied migration; add the next numbered file. The runner refuses an applied file whose checksum changed and records interrupted or failed migrations for manual resolution. Seeds are idempotent and may be rerun; they are not a substitute for the administrative path that changes module status.
 
 `db:provision` is the only tenant-creation path in M0. It connects with `DB_OWNER_URL`, never the runtime URL, prints only the new tenant and owner IDs, and is not exposed by the API. It creates the tenant, owner user, owner membership, initial entitlements and the `tenant.provisioned` audit event in one transaction; a failure rolls all of it back.
 
-## Runtime role
+`db:invite` creates a one-time invitation for a user with an invited membership in the tenant. It connects with `DB_OWNER_URL`, never the runtime URL, validates the tenant slug, email and expiry window (1–30 days, default 7), revokes older unconsumed invitations for the same membership, and prints the invitation ID, tenant ID, email, expiry and the raw token exactly once with an out-of-band delivery warning. It does not print a password or connection string and is not exposed by the API. The invited user may be a first-time invitee or an already-active user being added to a second tenant; an active user must already hold a password, since acceptance reuses the existing credential rather than setting one.
 
-`pnpm db:bootstrap` creates two roles:
+## Database roles
+
+`pnpm db:bootstrap` creates three roles:
 
 - `saas_owner` owns the database, schemas and tables and runs migrations, seeds and provisioning. It is not the application role.
-- `saas_runtime` is a login role that does not own tables and does not have `BYPASSRLS`.
+- `saas_runtime` is a login role that does not own tables and does not have `BYPASSRLS`. It serves tenant business data.
+- `saas_auth` is a login role that does not own tables and does not have `BYPASSRLS`. It serves identity lookups and session storage only.
 
-The runtime grant allowlist is [packages/db/sql/runtime-grants.sql](../../packages/db/sql/runtime-grants.sql) and is reapplied after every migration. It grants:
+### Runtime role
+
+The runtime grant allowlist is [packages/db/sql/runtime-grants.sql](../../packages/db/sql/runtime-grants.sql). It and the auth allowlist [packages/db/sql/auth-grants.sql](../../packages/db/sql/auth-grants.sql) are reapplied after every migration. The runtime grants:
 
 - `USAGE` on `public` and `app`, but no `CREATE`.
 - `SELECT` on the module catalog, dependencies and entitlements.
 - Full `SELECT, INSERT, UPDATE, DELETE` on exactly two M0 proof tables: `employment` (People) and `project` (Work). Every other tenant table, including `person`, `client`, `legal_entity`, `tenant` and `app_user`, stays owner-only. Further tables gain grants per command as their API paths land.
-- `INSERT` on `audit_event` only. The runtime can append audit rows through `appendAuditEvent` but has no `SELECT`, `UPDATE` or `DELETE` on the audit trail. There is no grant on `membership`, `app_user` or `tenant`.
+- `INSERT` on `audit_event` only. The runtime can append audit rows through `appendAuditEvent` but has no `SELECT`, `UPDATE` or `DELETE` on the audit trail. There is no grant on `membership`, `app_user` or `tenant`, and none on `auth_session` or `invitation`; those are auth-role objects.
 - `EXECUTE` on `app.current_tenant_id()`, `app.current_member_role()`, the four access helpers (`has_platform_access`, `has_module_read`, `has_module_write`, `has_switch_access`) and the `has_active_module` compatibility alias (an exact delegate to `has_module_write`). Administrative procedures (`enable_tenant_rls`, `add_updated_at`, `apply_module_policies`) and trigger functions are revoked.
 
 There is no blanket `GRANT ON ALL TABLES` and no default privileges grant. The runtime cannot write the module catalog or its dependencies, cannot truncate, and cannot create objects. Membership is resolved through the security-definer helper `app.current_member_role()`, not a table grant.
@@ -44,7 +50,26 @@ set local app.user_id = '<user-uuid>';   -- request paths only
 
 RLS denies all tenant rows when `app.tenant_id` is unset. Request routes use `withMemberTransaction`, which validates both UUIDs, sets both settings transaction-locally, resolves the active membership role first, then checks platform access and the module gate on the same connection. A non-member or suspended member receives `MEMBERSHIP_DENIED` before the platform check, so tenant existence and status are not disclosed. A member of a suspended, closed or deleted tenant receives `PLATFORM_ACCESS_DENIED`. `withTenantTransaction` remains the system/background path; it does not check membership and must not be used by request routes. The runtime role must not be the table owner and must not have `BYPASSRLS`.
 
-Tenant creation runs through the owner-only `provisionTenant` library and `db:provision` CLI. It is never reachable from the API. Identity, login and pre-tenant membership discovery are not implemented yet; a request principal is still injected by the caller, and the only membership lookup is the helper for an already-resolved tenant and user.
+Tenant creation runs through the owner-only `provisionTenant` library and `db:provision` CLI. It is never reachable from the API. Membership discovery for login is scoped by a tenant slug, not a global email lookup.
+
+## Auth role
+
+`saas_auth` receives no table privileges outside this allowlist:
+
+- `SELECT (id, email, display_name, status, last_login_at)` and `UPDATE (password_hash, status, last_login_at)` on `app_user`. The role cannot read `password_hash` through a table grant; the hash is readable only through the security-definer `app.auth_credentials(uuid, citext)`.
+- `SELECT, INSERT, UPDATE` on `auth_session`.
+- `SELECT (id, tenant_id, user_id, token_hash, expires_at, accepted_at, revoked_at)` and `UPDATE (accepted_at)` on `invitation`.
+- `EXECUTE` on `app.auth_tenant_by_slug(citext)`, `app.auth_tenant_by_id(uuid)`, `app.auth_credentials(uuid, citext)`, `app.auth_membership_status(uuid, uuid)` and `app.auth_activate_membership(uuid, uuid)`.
+
+The auth role has no table privilege on `membership`: status is reachable only through `app.auth_membership_status(uuid, uuid)`, and activation only through `app.auth_activate_membership(uuid, uuid)`.
+
+It has no privilege on `tenant`, the module catalog, entitlements, audit or any business table, and no DDL or `TRUNCATE`. The auth helper functions are security-definer, use an empty `search_path`, and are revoked from `PUBLIC` and `saas_runtime`; the lookup and status helpers are stable. `app_user`, `membership`, `auth_session` and `invitation` are revoked from `saas_runtime`.
+
+`auth_tenant_by_slug` and `auth_tenant_by_id` are the minimum needed to resolve a tenant before a session exists. `auth_credentials`, `auth_membership_status` and `auth_activate_membership` exist because the column grants deliberately exclude `password_hash`, and because reading membership status or activating an invited membership would otherwise require table privileges the auth role must not hold. EXECUTE on all five helpers is granted from `packages/db/sql/auth-grants.sql` after migrations, not from a migration, so the identity allowlist stays in one place.
+
+Identity is global: `app_user.email` is unique across the platform, while memberships are per tenant. Login selects the user's membership by tenant slug, so the same email and password sign in to each tenant the user belongs to.
+
+`auth_session` and `invitation` are deliberately not tenant-RLS-scoped. A session must be resolvable before `app.tenant_id` exists, and an invitation token is a pre-authentication credential. Forcing tenant RLS on either would require an owner-only or security-definer lookup keyed by tenant and token; no FORCE is enabled in a migration, and no such helper is tested. The auth role's grant allowlist and hashed random tokens are the boundary; tenant and membership checks still run in `withMemberTransaction` after session resolution.
 
 ## Conventions
 
@@ -63,6 +88,10 @@ Tenant creation runs through the owner-only `provisionTenant` library and `db:pr
 - Membership roles are constrained to `owner`, `admin`, `hr`, `finance`, `manager`, `employee` and `auditor`. `app.current_member_role()` returns the role only for an active membership in the current tenant; a suspended membership or no membership returns null. There is no role or scope enforcement in M0.
 - `person` and `client` are shared directory records. A module may extend them but may not create a competing person or client.
 - `audit_event` is append-only; updates and deletes raise an error. Provisioning and entitlement changes append audit rows in the same transaction. The runtime can insert audit rows only; it cannot read, update or delete them.
+- Passwords are hashed with Argon2id (19,456 KiB, time cost 2, parallelism 1, 32-byte output) and never stored, logged or returned in plaintext.
+- `auth_session` stores only the SHA-256 hash of a 32-byte random token (64 lowercase hex), never the token itself. The CSRF token is a separate 32-byte base64url value stored as-is. Sessions have a 12-hour absolute expiry and no sliding renewal, rotation or device list.
+- `invitation` stores only the SHA-256 hash of a 32-byte token, is single-use, and expires after 7 days by default (1–30 days allowed). Creating a new invitation revokes older unconsumed rows for the same membership in the same transaction; there is no partial unique index. Invitation creation is not yet audited. Acceptance activates the invited membership and creates a session in one transaction; a first-time invitee sets a password, while an active user invited to a second tenant verifies its existing password, which is never replaced.
+- `auth_session` and `invitation` are not tenant-RLS-scoped; they are reachable only by `saas_auth` through hashed-token lookups. Tenant and membership checks run after session resolution.
 - `source_system`, `source_id`, `import_batch_id`, `imported_at` on importable production tables.
 
 ## Entity ownership
@@ -78,6 +107,7 @@ Tenant creation runs through the owner-only `provisionTenant` library and `db:pr
 | `0007_modules.sql` | platform_module, platform_module_dependency, module_entitlement |
 | `0008_platform_access.sql` | tenant.is_internal, module_entitlement.read_until, app.has_platform_access(), app.has_module_read(), app.has_module_write(), app.has_switch_access(), app.has_active_module() (alias), app.apply_module_policies() and the module RLS policies |
 | `0009_member_access.sql` | app.current_member_role() |
+| `0010_identity.sql` | auth_session, invitation, app.auth_tenant_by_slug(), app.auth_tenant_by_id(), app.auth_credentials(), app.auth_membership_status(), app.auth_activate_membership() |
 
 `person` is created in `0002_people.sql` and `client` in `0003_work.sql`, but both are shared directory records. Ownership is the architecture contract, not the migration filename.
 
@@ -101,7 +131,8 @@ A payroll run records the exact rule packs it used. Changing a rule means adding
 - Full-text search indexes (permission-aware search is a service concern).
 - Reporting views and materialized margin views.
 - Seeded jurisdiction content and reviewed rule-pack data. The tables exist; the statutory content does not yet.
-- Identity, sessions, passwords, invitation acceptance and login-time tenant discovery.
+- Password reset, email delivery, MFA, OAuth/SSO, SCIM, tenant switching, session rotation, device lists and distributed rate limiting. Login by tenant slug, session validation, CSRF checks and one-time invitation acceptance exist; there is no web login UI.
+- Authentication-event audit. Provisioning and entitlement changes are audited; login, failed login, logout, invitation creation and invitation acceptance are not.
 - Role and scope enforcement. `withMemberTransaction` returns the resolved role but does not authorize actions from it.
 - Denied-request auditing, an audit read API or UI, and an entitlement administration UI.
 - `FORCE ROW LEVEL SECURITY` by default. Provisioning is tested under FORCE on `tenant`; the table is not forced in a migration.

@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { Client } from 'pg';
 import {
   assertLocalDatabaseUrl,
+  AUTH_ROLE,
   databaseUrlWithName,
   migrate,
   OWNER_ROLE,
@@ -12,12 +13,14 @@ export type TestDatabaseUrls = {
   adminUrl: string;
   ownerUrl: string;
   runtimeUrl: string;
+  authUrl: string;
 };
 
 export type TestDatabase = {
   name: string;
   ownerUrl: string;
   runtimeUrl: string;
+  authUrl: string;
   drop: () => Promise<void>;
 };
 
@@ -40,6 +43,7 @@ export function readTestDatabaseUrls(): TestDatabaseUrls {
     adminUrl: assertLocalDatabaseUrl('TEST_DB_ADMIN_URL', process.env.TEST_DB_ADMIN_URL),
     ownerUrl: assertLocalDatabaseUrl('TEST_DB_OWNER_URL', process.env.TEST_DB_OWNER_URL),
     runtimeUrl: assertLocalDatabaseUrl('TEST_DB_RUNTIME_URL', process.env.TEST_DB_RUNTIME_URL),
+    authUrl: assertLocalDatabaseUrl('TEST_DB_AUTH_URL', process.env.TEST_DB_AUTH_URL),
   };
 }
 
@@ -58,6 +62,7 @@ export async function createTestDatabase(
   const adminUrl = assertLocalDatabaseUrl('TEST_DB_ADMIN_URL', urls.adminUrl);
   const ownerSourceUrl = assertLocalDatabaseUrl('TEST_DB_OWNER_URL', urls.ownerUrl);
   const runtimeSourceUrl = assertLocalDatabaseUrl('TEST_DB_RUNTIME_URL', urls.runtimeUrl);
+  const authSourceUrl = assertLocalDatabaseUrl('TEST_DB_AUTH_URL', urls.authUrl);
   const name = makeDatabaseName(options.namePrefix ?? 'saasmodels_test');
   const databaseIdentifier = quoteIdentifier(name);
   const admin = new Client({ connectionString: adminUrl });
@@ -68,6 +73,12 @@ export async function createTestDatabase(
     if (owner.rowCount === 0) {
       throw new Error(`Role ${OWNER_ROLE} does not exist. Run pnpm db:bootstrap first.`);
     }
+    const auth = await admin.query('select 1 from pg_roles where rolname = $1', [AUTH_ROLE]);
+    if (auth.rowCount === 0) {
+      throw new Error(
+        `Role ${AUTH_ROLE} does not exist. Run pnpm db:bootstrap with SAAS_AUTH_PASSWORD set.`,
+      );
+    }
     await admin.query(`create database ${databaseIdentifier} owner ${quoteIdentifier(OWNER_ROLE)}`);
   } finally {
     await admin.end();
@@ -75,6 +86,7 @@ export async function createTestDatabase(
 
   const ownerUrl = databaseUrlWithName(ownerSourceUrl, name);
   const runtimeUrl = databaseUrlWithName(runtimeSourceUrl, name);
+  const authUrl = databaseUrlWithName(authSourceUrl, name);
 
   const drop = async (): Promise<void> => {
     const dropper = new Client({ connectionString: adminUrl });
@@ -98,5 +110,5 @@ export async function createTestDatabase(
     throw error;
   }
 
-  return { name, ownerUrl, runtimeUrl, drop };
+  return { name, ownerUrl, runtimeUrl, authUrl, drop };
 }

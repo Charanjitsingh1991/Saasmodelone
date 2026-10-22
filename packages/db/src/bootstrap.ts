@@ -5,6 +5,7 @@ export type BootstrapOptions = {
   adminUrl: string;
   ownerPassword: string;
   runtimePassword: string;
+  authPassword: string;
   databaseName?: string;
   log?: (event: Record<string, unknown>) => void;
 };
@@ -13,10 +14,12 @@ export type BootstrapResult = {
   databaseName: string;
   ownerRole: string;
   runtimeRole: string;
+  authRole: string;
 };
 
 export const OWNER_ROLE = 'saas_owner';
 export const RUNTIME_ROLE = 'saas_runtime';
+export const AUTH_ROLE = 'saas_auth';
 const DEFAULT_DATABASE = 'saasmodels';
 
 function quoteIdentifier(value: string): string {
@@ -66,6 +69,9 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapRes
   if (!options.runtimePassword) {
     throw new Error('SAAS_RUNTIME_PASSWORD is required');
   }
+  if (!options.authPassword) {
+    throw new Error('SAAS_AUTH_PASSWORD is required');
+  }
 
   const admin = new Client({ connectionString: adminUrl });
   await admin.connect();
@@ -73,6 +79,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapRes
   try {
     await ensureRole(admin, OWNER_ROLE, options.ownerPassword, log);
     await ensureRole(admin, RUNTIME_ROLE, options.runtimePassword, log);
+    await ensureRole(admin, AUTH_ROLE, options.authPassword, log);
 
     const database = await admin.query('select 1 from pg_database where datname = $1', [
       databaseName,
@@ -94,6 +101,12 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapRes
     await admin.query(
       `revoke create on database ${databaseIdentifier} from ${quoteIdentifier(RUNTIME_ROLE)}`,
     );
+    await admin.query(
+      `grant connect on database ${databaseIdentifier} to ${quoteIdentifier(AUTH_ROLE)}`,
+    );
+    await admin.query(
+      `revoke create on database ${databaseIdentifier} from ${quoteIdentifier(AUTH_ROLE)}`,
+    );
 
     const databaseAdminUrl = databaseUrlWithName(adminUrl, databaseName);
     const scoped = new Client({ connectionString: databaseAdminUrl });
@@ -106,6 +119,16 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapRes
       );
       await scoped.query(`revoke create on schema public from ${quoteIdentifier(RUNTIME_ROLE)}`);
       await scoped.query(`revoke all on schema public from ${quoteIdentifier(RUNTIME_ROLE)}`);
+      await scoped.query(`grant usage on schema public to ${quoteIdentifier(AUTH_ROLE)}`);
+      await scoped.query(`revoke create on schema public from ${quoteIdentifier(AUTH_ROLE)}`);
+
+      const appSchema = await scoped.query(
+        "select 1 from pg_namespace where nspname = 'app'",
+      );
+      if (appSchema.rowCount === 1) {
+        await scoped.query(`grant usage on schema app to ${quoteIdentifier(AUTH_ROLE)}`);
+        await scoped.query(`revoke create on schema app from ${quoteIdentifier(AUTH_ROLE)}`);
+      }
     } finally {
       await scoped.end();
     }
@@ -120,6 +143,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapRes
       databaseName,
       ownerRole: OWNER_ROLE,
       runtimeRole: RUNTIME_ROLE,
+      authRole: AUTH_ROLE,
     };
   } finally {
     await admin.end().catch(() => undefined);

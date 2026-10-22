@@ -12,7 +12,7 @@ export type MigrationResult = {
 export type MigrationOptions = {
   ownerUrl: string;
   migrationsDir?: string;
-  grantsFile?: string;
+  grantsFiles?: string[];
   log?: (event: Record<string, unknown>) => void;
 };
 
@@ -24,8 +24,12 @@ function defaultMigrationsDir(): string {
     : path.resolve(process.cwd(), 'suite', 'db', 'migrations');
 }
 
-function defaultGrantsFile(): string {
-  return path.resolve(process.cwd(), 'packages', 'db', 'sql', 'runtime-grants.sql');
+function defaultGrantsFiles(): string[] {
+  const directory = path.resolve(process.cwd(), 'packages', 'db', 'sql');
+  return [
+    path.join(directory, 'runtime-grants.sql'),
+    path.join(directory, 'auth-grants.sql'),
+  ];
 }
 
 export async function listSqlFiles(directory: string): Promise<string[]> {
@@ -61,7 +65,7 @@ async function ensureLedger(client: Client): Promise<void> {
 export async function migrate(options: MigrationOptions): Promise<MigrationResult> {
   const ownerUrl = assertLocalDatabaseUrl('DB_OWNER_URL', options.ownerUrl);
   const migrationsDir = options.migrationsDir ?? defaultMigrationsDir();
-  const grantsFile = options.grantsFile ?? defaultGrantsFile();
+  const grantsFiles = options.grantsFiles ?? defaultGrantsFiles();
   const log = options.log ?? (() => undefined);
   const files = await listSqlFiles(migrationsDir);
 
@@ -152,9 +156,11 @@ export async function migrate(options: MigrationOptions): Promise<MigrationResul
       log({ event: 'migration.applied', version: file, durationMs });
     }
 
-    const grants = await readFile(grantsFile, 'utf8');
-    await client.query(grants);
-    log({ event: 'grants.applied', file: path.basename(grantsFile) });
+    for (const grantsFile of grantsFiles) {
+      const grants = await readFile(grantsFile, 'utf8');
+      await client.query(grants);
+      log({ event: 'grants.applied', file: path.basename(grantsFile) });
+    }
 
     return result;
   } finally {

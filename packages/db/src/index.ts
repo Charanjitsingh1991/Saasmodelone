@@ -1,7 +1,31 @@
 export type { AuditActorType, AuditEventInput } from './audit.js';
 export { appendAuditEvent, InvalidAuditEventError } from './audit.js';
+export type {
+  AcceptInvitationInput,
+  AuthErrorCode,
+  AuthPool,
+  CreateInvitationInput,
+  CreatedInvitation,
+  LoginInput,
+  SessionInfo,
+  SessionRecord,
+} from './auth.js';
+export {
+  acceptInvitation,
+  AuthError,
+  createAuthPool,
+  createInvitation,
+  findSession,
+  hashPassword,
+  login,
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  revokeSession,
+  SESSION_TTL_MS,
+  verifyPassword,
+} from './auth.js';
 export type { BootstrapOptions, BootstrapResult } from './bootstrap.js';
-export { bootstrap, OWNER_ROLE, RUNTIME_ROLE } from './bootstrap.js';
+export { AUTH_ROLE, bootstrap, OWNER_ROLE, RUNTIME_ROLE } from './bootstrap.js';
 export {
   assertLocalDatabaseUrl,
   databaseUrlWithName,

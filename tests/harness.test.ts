@@ -5,6 +5,7 @@ import { Client } from 'pg';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import {
   assertLocalDatabaseUrl,
+  AUTH_ROLE,
   listSqlFiles,
   migrate,
   OWNER_ROLE,
@@ -37,6 +38,12 @@ async function runtimeClient(): Promise<Client> {
   return client;
 }
 
+async function authClient(): Promise<Client> {
+  const client = new Client({ connectionString: db().authUrl });
+  await client.connect();
+  return client;
+}
+
 beforeAll(async () => {
   database = await createTestDatabase({ migrate: false });
 });
@@ -48,7 +55,7 @@ afterAll(async () => {
 describe('local database harness', () => {
   test('fresh apply records every baseline migration and creates the schema', async () => {
     const expected = await listSqlFiles(migrationsDir);
-    expect(expected).toHaveLength(9);
+    expect(expected).toHaveLength(10);
 
     const result = await migrate({ ownerUrl: db().ownerUrl });
     expect(result.applied).toEqual(expected);
@@ -81,6 +88,8 @@ describe('local database harness', () => {
           'platform_module_dependency',
           'module_entitlement',
           'import_batch',
+          'auth_session',
+          'invitation',
         ]),
       );
 
@@ -100,6 +109,11 @@ describe('local database harness', () => {
           'has_switch_access',
           'apply_module_policies',
           'current_member_role',
+          'auth_tenant_by_slug',
+          'auth_tenant_by_id',
+          'auth_credentials',
+          'auth_membership_status',
+          'auth_activate_membership',
         ]),
       );
     } finally {
@@ -275,6 +289,13 @@ describe('runtime role privileges', () => {
         entitlement_select: boolean;
         invoice_select: boolean;
         app_user_select: boolean;
+        auth_session_select: boolean;
+        auth_session_insert: boolean;
+        auth_session_update: boolean;
+        auth_session_delete: boolean;
+        invitation_select: boolean;
+        invitation_insert: boolean;
+        invitation_update: boolean;
         schema_create: boolean;
         database_create: boolean;
       }>(`
@@ -287,6 +308,13 @@ describe('runtime role privileges', () => {
           has_table_privilege(current_user, 'public.module_entitlement', 'SELECT') as entitlement_select,
           has_table_privilege(current_user, 'public.invoice', 'SELECT') as invoice_select,
           has_table_privilege(current_user, 'public.app_user', 'SELECT') as app_user_select,
+          has_table_privilege(current_user, 'public.auth_session', 'SELECT') as auth_session_select,
+          has_table_privilege(current_user, 'public.auth_session', 'INSERT') as auth_session_insert,
+          has_table_privilege(current_user, 'public.auth_session', 'UPDATE') as auth_session_update,
+          has_table_privilege(current_user, 'public.auth_session', 'DELETE') as auth_session_delete,
+          has_table_privilege(current_user, 'public.invitation', 'SELECT') as invitation_select,
+          has_table_privilege(current_user, 'public.invitation', 'INSERT') as invitation_insert,
+          has_table_privilege(current_user, 'public.invitation', 'UPDATE') as invitation_update,
           has_schema_privilege(current_user, 'public', 'CREATE') as schema_create,
           has_database_privilege(current_user, current_database(), 'CREATE') as database_create
       `);
@@ -299,6 +327,13 @@ describe('runtime role privileges', () => {
         entitlement_select: true,
         invoice_select: false,
         app_user_select: false,
+        auth_session_select: false,
+        auth_session_insert: false,
+        auth_session_update: false,
+        auth_session_delete: false,
+        invitation_select: false,
+        invitation_insert: false,
+        invitation_update: false,
         schema_create: false,
         database_create: false,
       });
@@ -315,6 +350,11 @@ describe('runtime role privileges', () => {
         has_switch_access: boolean;
         apply_module_policies: boolean;
         current_member_role: boolean;
+        auth_tenant_by_slug: boolean;
+        auth_tenant_by_id: boolean;
+        auth_credentials: boolean;
+        auth_activate_membership: boolean;
+        auth_membership_status: boolean;
       }>(`
         select
           has_function_privilege(current_user, 'app.current_tenant_id()', 'EXECUTE') as current_tenant,
@@ -327,7 +367,12 @@ describe('runtime role privileges', () => {
           has_function_privilege(current_user, 'app.has_module_write(text)', 'EXECUTE') as has_module_write,
           has_function_privilege(current_user, 'app.has_switch_access()', 'EXECUTE') as has_switch_access,
           has_function_privilege(current_user, 'app.apply_module_policies()', 'EXECUTE') as apply_module_policies,
-          has_function_privilege(current_user, 'app.current_member_role()', 'EXECUTE') as current_member_role
+          has_function_privilege(current_user, 'app.current_member_role()', 'EXECUTE') as current_member_role,
+          has_function_privilege(current_user, 'app.auth_tenant_by_slug(citext)', 'EXECUTE') as auth_tenant_by_slug,
+          has_function_privilege(current_user, 'app.auth_tenant_by_id(uuid)', 'EXECUTE') as auth_tenant_by_id,
+          has_function_privilege(current_user, 'app.auth_credentials(uuid, citext)', 'EXECUTE') as auth_credentials,
+          has_function_privilege(current_user, 'app.auth_activate_membership(uuid, uuid)', 'EXECUTE') as auth_activate_membership,
+          has_function_privilege(current_user, 'app.auth_membership_status(uuid, uuid)', 'EXECUTE') as auth_membership_status
       `);
       expect(routines.rows[0]).toEqual({
         current_tenant: true,
@@ -341,6 +386,11 @@ describe('runtime role privileges', () => {
         has_switch_access: true,
         apply_module_policies: false,
         current_member_role: true,
+        auth_tenant_by_slug: false,
+        auth_tenant_by_id: false,
+        auth_credentials: false,
+        auth_activate_membership: false,
+        auth_membership_status: false,
       });
 
       const catalog = await client.query<{ count: string }>(
@@ -403,6 +453,232 @@ describe('runtime role privileges', () => {
       await expect(client.query('create schema runtime_probe')).rejects.toMatchObject({
         code: '42501',
       });
+    } finally {
+      await client.end();
+    }
+  });
+});
+
+describe('auth role privileges', () => {
+  test('is a non-owner login without elevated attributes or DDL', async () => {
+    const client = await authClient();
+    try {
+      const identity = await client.query<{
+        current_user: string;
+        owner: string;
+        rolsuper: boolean;
+        rolcreaterole: boolean;
+        rolcreatedb: boolean;
+        rolbypassrls: boolean;
+        rolcanlogin: boolean;
+      }>(`
+        select
+          current_user,
+          (select pg_get_userbyid(datdba) from pg_database where datname = current_database()) as owner,
+          r.rolsuper,
+          r.rolcreaterole,
+          r.rolcreatedb,
+          r.rolbypassrls,
+          r.rolcanlogin
+        from pg_roles r
+        where r.rolname = current_user
+      `);
+      expect(identity.rows[0]).toEqual({
+        current_user: AUTH_ROLE,
+        owner: OWNER_ROLE,
+        rolsuper: false,
+        rolcreaterole: false,
+        rolcreatedb: false,
+        rolbypassrls: false,
+        rolcanlogin: true,
+      });
+
+      const privileges = await client.query<{
+        app_user_id_select: boolean;
+        app_user_email_select: boolean;
+        password_hash_select: boolean;
+        password_hash_update: boolean;
+        display_name_update: boolean;
+        session_select: boolean;
+        session_insert: boolean;
+        session_update: boolean;
+        session_delete: boolean;
+        invitation_token_select: boolean;
+        invitation_accept_update: boolean;
+        invitation_token_update: boolean;
+        membership_select: boolean;
+        lookup_execute: boolean;
+        lookup_by_id_execute: boolean;
+        credentials_execute: boolean;
+        membership_status_execute: boolean;
+        activate_execute: boolean;
+        current_tenant_execute: boolean;
+        module_helper_execute: boolean;
+        schema_create: boolean;
+        app_schema_create: boolean;
+        database_create: boolean;
+      }>(`
+        select
+          has_column_privilege(current_user, 'public.app_user', 'id', 'SELECT') as app_user_id_select,
+          has_column_privilege(current_user, 'public.app_user', 'email', 'SELECT') as app_user_email_select,
+          has_column_privilege(current_user, 'public.app_user', 'password_hash', 'SELECT') as password_hash_select,
+          has_column_privilege(current_user, 'public.app_user', 'password_hash', 'UPDATE') as password_hash_update,
+          has_column_privilege(current_user, 'public.app_user', 'display_name', 'UPDATE') as display_name_update,
+          has_table_privilege(current_user, 'public.auth_session', 'SELECT') as session_select,
+          has_table_privilege(current_user, 'public.auth_session', 'INSERT') as session_insert,
+          has_table_privilege(current_user, 'public.auth_session', 'UPDATE') as session_update,
+          has_table_privilege(current_user, 'public.auth_session', 'DELETE') as session_delete,
+          has_column_privilege(current_user, 'public.invitation', 'token_hash', 'SELECT') as invitation_token_select,
+          has_column_privilege(current_user, 'public.invitation', 'accepted_at', 'UPDATE') as invitation_accept_update,
+          has_column_privilege(current_user, 'public.invitation', 'token_hash', 'UPDATE') as invitation_token_update,
+          has_table_privilege(current_user, 'public.membership', 'SELECT') as membership_select,
+          has_function_privilege(current_user, 'app.auth_tenant_by_slug(citext)', 'EXECUTE') as lookup_execute,
+          has_function_privilege(current_user, 'app.auth_tenant_by_id(uuid)', 'EXECUTE') as lookup_by_id_execute,
+          has_function_privilege(current_user, 'app.auth_credentials(uuid, citext)', 'EXECUTE') as credentials_execute,
+          has_function_privilege(current_user, 'app.auth_membership_status(uuid, uuid)', 'EXECUTE') as membership_status_execute,
+          has_function_privilege(current_user, 'app.auth_activate_membership(uuid, uuid)', 'EXECUTE') as activate_execute,
+          has_function_privilege(current_user, 'app.current_tenant_id()', 'EXECUTE') as current_tenant_execute,
+          has_function_privilege(current_user, 'app.has_active_module(text)', 'EXECUTE') as module_helper_execute,
+          has_schema_privilege(current_user, 'public', 'CREATE') as schema_create,
+          has_schema_privilege(current_user, 'app', 'CREATE') as app_schema_create,
+          has_database_privilege(current_user, current_database(), 'CREATE') as database_create
+      `);
+      expect(privileges.rows[0]).toEqual({
+        app_user_id_select: true,
+        app_user_email_select: true,
+        password_hash_select: false,
+        password_hash_update: true,
+        display_name_update: false,
+        session_select: true,
+        session_insert: true,
+        session_update: true,
+        session_delete: false,
+        invitation_token_select: true,
+        invitation_accept_update: true,
+        invitation_token_update: false,
+        membership_select: false,
+        lookup_execute: true,
+        lookup_by_id_execute: true,
+        credentials_execute: true,
+        membership_status_execute: true,
+        activate_execute: true,
+        current_tenant_execute: false,
+        module_helper_execute: false,
+        schema_create: false,
+        app_schema_create: false,
+        database_create: false,
+      });
+    } finally {
+      await client.end();
+    }
+  });
+
+  test('reads only the granted identity columns', async () => {
+    const client = await authClient();
+    try {
+      await client.query(
+        'select id, email, display_name, status, last_login_at from app_user limit 1',
+      );
+      await client.query(
+        `select id, tenant_id, user_id, token_hash, expires_at, accepted_at, revoked_at
+           from invitation limit 1`,
+      );
+      await client.query(
+        `select id, user_id, tenant_id, token_hash, csrf_token, created_at, expires_at,
+                revoked_at, ip, user_agent
+           from auth_session limit 1`,
+      );
+
+      const lookup = await client.query(
+        "select * from app.auth_tenant_by_slug('missing-auth-slug')",
+      );
+      expect(lookup.rows).toEqual([]);
+
+      // Membership status is reachable only through app.auth_membership_status;
+      // membership itself carries tenant RLS, which the auth role cannot set.
+      const status = await client.query(
+        'select user_status, membership_status from app.auth_membership_status($1, $2)',
+        ['00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002'],
+      );
+      expect(status.rows).toEqual([]);
+
+      for (const sql of [
+        'select password_hash from app_user',
+        'select * from app_user',
+        'select id, tenant_id, user_id, role, status from membership limit 1',
+        'select * from tenant',
+        'select * from employment',
+        'select * from person',
+        'select * from audit_event',
+        'select * from platform_module',
+        'select * from module_entitlement',
+        'select * from invoice',
+      ]) {
+        await expect(client.query(sql)).rejects.toMatchObject({ code: '42501' });
+      }
+    } finally {
+      await client.end();
+    }
+  });
+
+  test('cannot write identity outside its grants or touch business data', async () => {
+    const client = await authClient();
+    try {
+      const forbidden = [
+        "insert into platform_module (code, name, category) values ('auth_probe', 'Probe', 'test')",
+        "insert into app_user (email, display_name) values ('auth_probe@example.test', 'Probe')",
+        "update app_user set display_name = 'Probe'",
+        'delete from auth_session',
+        "update invitation set token_hash = repeat('a', 64)",
+        'truncate platform_module',
+        'create table public.auth_probe (id integer)',
+        'create schema auth_probe',
+        'create database auth_probe',
+      ];
+      for (const sql of forbidden) {
+        await expect(client.query(sql)).rejects.toMatchObject({ code: '42501' });
+      }
+    } finally {
+      await client.end();
+    }
+  });
+
+  test('cannot execute tenant, module or administrative helpers', async () => {
+    const client = await authClient();
+    try {
+      const calls = [
+        "call app.enable_tenant_rls('tenant')",
+        "call app.add_updated_at('tenant')",
+        'select app.block_mutation()',
+        "select app.has_active_module('people')",
+        'select app.has_platform_access()',
+        "select app.has_module_read('people')",
+        "select app.has_module_write('people')",
+        'select app.has_switch_access()',
+        'call app.apply_module_policies()',
+        'select app.current_member_role()',
+        'select app.current_tenant_id()',
+      ];
+      for (const sql of calls) {
+        await expect(client.query(sql)).rejects.toMatchObject({ code: '42501' });
+      }
+    } finally {
+      await client.end();
+    }
+  });
+
+  test('runtime cannot read or write identity tables', async () => {
+    const client = await runtimeClient();
+    try {
+      const forbidden = [
+        'select * from auth_session',
+        'select * from invitation',
+        "insert into auth_session (user_id, tenant_id, token_hash, csrf_token, expires_at) values ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002', repeat('a', 64), repeat('b', 43), now() + interval '1 hour')",
+        'update invitation set accepted_at = now()',
+      ];
+      for (const sql of forbidden) {
+        await expect(client.query(sql)).rejects.toMatchObject({ code: '42501' });
+      }
     } finally {
       await client.end();
     }

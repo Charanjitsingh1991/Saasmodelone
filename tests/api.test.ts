@@ -1,20 +1,45 @@
-import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
-import { createRuntimePool, type RuntimePool } from '@saasmodels/db';
-import { createServer, type Authenticate, type Principal } from '@saasmodels/api';
+import {
+  createAuthPool,
+  createRuntimePool,
+  type AuthPool,
+  type RuntimePool,
+} from '@saasmodels/db';
+import { createServer } from '@saasmodels/api';
 import { createTestDatabase, type TestDatabase } from '@saasmodels/testkit';
 import {
   createAccessFixtures,
   type AccessFixtures,
   type EmploymentFixture,
 } from './support/access-fixtures.js';
+import {
+  createSessionFixture,
+  randomToken,
+  type SessionFixture,
+} from './support/auth-fixtures.js';
+
+const appOrigin = 'https://app.example.test';
 
 type TestServer = ReturnType<typeof createServer>;
 
+type Sessions = {
+  a: SessionFixture;
+  b: SessionFixture;
+  cancelled: SessionFixture;
+  suspendedTenant: SessionFixture;
+  closedTenant: SessionFixture;
+  deletedTenant: SessionFixture;
+  nonMember: SessionFixture;
+  suspendedMember: SessionFixture;
+  crossTenant: SessionFixture;
+};
+
 let database: TestDatabase | undefined;
 let fixtures: AccessFixtures | undefined;
-const pool = { current: undefined as ReturnType<typeof createRuntimePool> | undefined };
+let runtime: RuntimePool | undefined;
+let auth: AuthPool | undefined;
+let sessions: Sessions | undefined;
 
 function fx(): AccessFixtures {
   if (!fixtures) {
@@ -23,29 +48,52 @@ function fx(): AccessFixtures {
   return fixtures;
 }
 
-function runtimePool(): ReturnType<typeof createRuntimePool> {
-  if (!pool.current) {
+function runtimePool(): RuntimePool {
+  if (!runtime) {
     throw new Error('Runtime pool has not been created');
   }
-  return pool.current;
+  return runtime;
 }
 
-function principalFor(fixture: EmploymentFixture): Principal {
-  return { userId: fixture.userId, tenantId: fixture.tenantId };
+function authPool(): AuthPool {
+  if (!auth) {
+    throw new Error('Auth pool has not been created');
+  }
+  return auth;
 }
 
-const authenticateAs = (principal: Principal | null): Authenticate => async () => principal;
+function session(name: keyof Sessions): SessionFixture {
+  if (!sessions) {
+    throw new Error('Sessions have not been created');
+  }
+  return sessions[name];
+}
+
+async function sessionFor(
+  owner: Client,
+  fixture: EmploymentFixture,
+): Promise<SessionFixture> {
+  return createSessionFixture(owner, {
+    userId: fixture.userId,
+    tenantId: fixture.tenantId,
+  });
+}
 
 async function withApp<T>(
-  authenticate: Authenticate,
   fn: (app: TestServer) => Promise<T>,
-  enableProofRoutes = true,
-  serverPool: RuntimePool = runtimePool(),
+  options: {
+    enableProofRoutes?: boolean;
+    pool?: RuntimePool;
+    authPool?: AuthPool;
+    secureCookies?: boolean;
+  } = {},
 ): Promise<T> {
   const app = createServer({
-    pool: serverPool,
-    authenticate,
-    enableProofRoutes,
+    pool: options.pool ?? runtimePool(),
+    authPool: options.authPool ?? authPool(),
+    appOrigin,
+    secureCookies: options.secureCookies ?? false,
+    enableProofRoutes: options.enableProofRoutes ?? true,
     logger: false,
   });
   await app.ready();
@@ -58,120 +106,138 @@ async function withApp<T>(
 
 beforeAll(async () => {
   database = await createTestDatabase({ migrate: true, seed: true });
-  pool.current = createRuntimePool(database.runtimeUrl);
+  runtime = createRuntimePool(database.runtimeUrl);
+  auth = createAuthPool(database.authUrl);
 
   const owner = new Client({ connectionString: database.ownerUrl });
   await owner.connect();
   try {
     fixtures = await createAccessFixtures(owner);
+    sessions = {
+      a: await sessionFor(owner, fixtures.a),
+      b: await sessionFor(owner, fixtures.b),
+      cancelled: await sessionFor(owner, fixtures.cancelled),
+      suspendedTenant: await sessionFor(owner, fixtures.suspended),
+      closedTenant: await sessionFor(owner, fixtures.closed),
+      deletedTenant: await sessionFor(owner, fixtures.deleted),
+      nonMember: await createSessionFixture(owner, {
+        userId: fixtures.nonMemberUserId,
+        tenantId: fixtures.a.tenantId,
+      }),
+      suspendedMember: await createSessionFixture(owner, {
+        userId: fixtures.suspendedMemberUserId,
+        tenantId: fixtures.a.tenantId,
+      }),
+      crossTenant: await createSessionFixture(owner, {
+        userId: fixtures.a.userId,
+        tenantId: fixtures.b.tenantId,
+      }),
+    };
   } finally {
     await owner.end();
   }
 });
 
 afterAll(async () => {
-  await pool.current?.end();
+  await auth?.end();
+  await runtime?.end();
   await database?.drop();
 });
 
 describe('API request layer', () => {
-  test('/health returns 200 without a principal or a database call', async () => {
-    const noDatabase = {
+  test('/health returns 200 without a session or a database call', async () => {
+    const deadPool = {
       connect: async () => {
         throw new Error('health must not touch the database');
       },
     } as unknown as RuntimePool;
+    const deadAuth = {
+      connect: async () => {
+        throw new Error('health must not touch the database');
+      },
+      query: async () => {
+        throw new Error('health must not touch the database');
+      },
+    } as unknown as AuthPool;
 
     await withApp(
-      async () => {
-        throw new Error('health must not authenticate');
-      },
       async (app) => {
         const response = await app.inject({ method: 'GET', url: '/health' });
         expect(response.statusCode).toBe(200);
         expect(response.json()).toEqual({ status: 'ok' });
       },
-      true,
-      noDatabase,
+      { pool: deadPool, authPool: deadAuth },
     );
   });
 
-  test('protected routes reject missing, malformed and unknown principals', async () => {
-    let current: Principal | null = null;
+  test('protected routes reject missing, malformed and unknown session cookies', async () => {
+    await withApp(async (app) => {
+      for (const cookie of [
+        undefined,
+        'saas_session=not-a-session-token',
+        `saas_session=${randomToken()}`,
+      ]) {
+        const noContext = await app.inject({
+          method: 'GET',
+          url: '/v1/context',
+          headers: cookie ? { cookie } : {},
+        });
+        expect(noContext.statusCode).toBe(401);
+        expect(noContext.json()).toEqual({ error: { code: 'UNAUTHENTICATED' } });
 
-    await withApp(async () => current, async (app) => {
-      const noContext = await app.inject({ method: 'GET', url: '/v1/context' });
-      expect(noContext.statusCode).toBe(401);
-      expect(noContext.json()).toEqual({ error: { code: 'UNAUTHENTICATED' } });
-
-      const noProof = await app.inject({
-        method: 'GET',
-        url: '/v1/proof/people/employment',
-      });
-      expect(noProof.statusCode).toBe(401);
-      expect(noProof.json()).toEqual({ error: { code: 'UNAUTHENTICATED' } });
-
-      current = { userId: 'malformed', tenantId: 'not-a-uuid' };
-      const malformed = await app.inject({ method: 'GET', url: '/v1/context' });
-      expect(malformed.statusCode).toBe(401);
-      expect(malformed.json()).toEqual({ error: { code: 'UNAUTHENTICATED' } });
-
-      current = { userId: randomUUID(), tenantId: randomUUID() };
-      const unknown = await app.inject({ method: 'GET', url: '/v1/context' });
-      expect(unknown.statusCode).toBe(403);
-      expect(unknown.json()).toEqual({ error: { code: 'MEMBERSHIP_DENIED' } });
+        const noProof = await app.inject({
+          method: 'GET',
+          url: '/v1/proof/people/employment',
+          headers: cookie ? { cookie } : {},
+        });
+        expect(noProof.statusCode).toBe(401);
+        expect(noProof.json()).toEqual({ error: { code: 'UNAUTHENTICATED' } });
+      }
     });
   });
 
   test('no membership and a suspended membership are denied before platform access', async () => {
-    let current: Principal | null = {
-      userId: fx().nonMemberUserId,
-      tenantId: fx().a.tenantId,
-    };
-
-    await withApp(async () => current, async (app) => {
-      const nonMemberContext = await app.inject({ method: 'GET', url: '/v1/context' });
+    await withApp(async (app) => {
+      const nonMemberContext = await app.inject({
+        method: 'GET',
+        url: '/v1/context',
+        headers: { cookie: session('nonMember').cookie },
+      });
       expect(nonMemberContext.statusCode).toBe(403);
       expect(nonMemberContext.json()).toEqual({ error: { code: 'MEMBERSHIP_DENIED' } });
 
       const nonMemberProof = await app.inject({
         method: 'GET',
         url: '/v1/proof/people/employment',
+        headers: { cookie: session('nonMember').cookie },
       });
       expect(nonMemberProof.statusCode).toBe(403);
       expect(nonMemberProof.json()).toEqual({ error: { code: 'MEMBERSHIP_DENIED' } });
 
-      // Membership resolves first, so a non-member cannot tell that this
-      // tenant is suspended rather than active.
-      current = {
-        userId: fx().nonMemberUserId,
-        tenantId: fx().suspended.tenantId,
-      };
-      const suspendedTenant = await app.inject({ method: 'GET', url: '/v1/context' });
-      expect(suspendedTenant.statusCode).toBe(403);
-      expect(suspendedTenant.json()).toEqual({ error: { code: 'MEMBERSHIP_DENIED' } });
-
-      current = {
-        userId: fx().suspendedMemberUserId,
-        tenantId: fx().a.tenantId,
-      };
-      const suspendedMembership = await app.inject({ method: 'GET', url: '/v1/context' });
+      const suspendedMembership = await app.inject({
+        method: 'GET',
+        url: '/v1/context',
+        headers: { cookie: session('suspendedMember').cookie },
+      });
       expect(suspendedMembership.statusCode).toBe(403);
       expect(suspendedMembership.json()).toEqual({ error: { code: 'MEMBERSHIP_DENIED' } });
     });
   });
 
-  test('a member of one tenant cannot switch to another tenant', async () => {
-    const principal = { userId: fx().a.userId, tenantId: fx().b.tenantId };
-
-    await withApp(authenticateAs(principal), async (app) => {
-      const context = await app.inject({ method: 'GET', url: '/v1/context' });
+  test('a session cannot select another tenant through a forged membership', async () => {
+    await withApp(async (app) => {
+      const context = await app.inject({
+        method: 'GET',
+        url: '/v1/context',
+        headers: { cookie: session('crossTenant').cookie },
+      });
       expect(context.statusCode).toBe(403);
       expect(context.json()).toEqual({ error: { code: 'MEMBERSHIP_DENIED' } });
 
       const proof = await app.inject({
         method: 'GET',
         url: '/v1/proof/work/projects',
+        headers: { cookie: session('crossTenant').cookie },
       });
       expect(proof.statusCode).toBe(403);
       expect(proof.json()).toEqual({ error: { code: 'MEMBERSHIP_DENIED' } });
@@ -179,14 +245,13 @@ describe('API request layer', () => {
   });
 
   test('suspended, closed and deleted tenants are denied on context and proof routes', async () => {
-    const tenants = [fx().suspended, fx().closed, fx().deleted];
-    let current: Principal | null = null;
-
-    await withApp(async () => current, async (app) => {
-      for (const tenant of tenants) {
-        current = principalFor(tenant);
-
-        const context = await app.inject({ method: 'GET', url: '/v1/context' });
+    await withApp(async (app) => {
+      for (const key of ['suspendedTenant', 'closedTenant', 'deletedTenant'] as const) {
+        const context = await app.inject({
+          method: 'GET',
+          url: '/v1/context',
+          headers: { cookie: session(key).cookie },
+        });
         expect(context.statusCode).toBe(403);
         expect(context.json()).toEqual({
           error: { code: 'PLATFORM_ACCESS_DENIED' },
@@ -195,6 +260,7 @@ describe('API request layer', () => {
         const proof = await app.inject({
           method: 'GET',
           url: '/v1/proof/people/employment',
+          headers: { cookie: session(key).cookie },
         });
         expect(proof.statusCode).toBe(403);
         expect(proof.json()).toEqual({
@@ -207,8 +273,12 @@ describe('API request layer', () => {
   test('tenant A sees People only and only its own employment', async () => {
     const a = fx().a;
 
-    await withApp(authenticateAs(principalFor(a)), async (app) => {
-      const context = await app.inject({ method: 'GET', url: '/v1/context' });
+    await withApp(async (app) => {
+      const context = await app.inject({
+        method: 'GET',
+        url: '/v1/context',
+        headers: { cookie: session('a').cookie },
+      });
       expect(context.statusCode).toBe(200);
       expect(context.json()).toEqual({
         userId: a.userId,
@@ -221,6 +291,7 @@ describe('API request layer', () => {
       const employment = await app.inject({
         method: 'GET',
         url: '/v1/proof/people/employment',
+        headers: { cookie: session('a').cookie },
       });
       expect(employment.statusCode).toBe(200);
       expect(employment.json()).toEqual({
@@ -238,6 +309,7 @@ describe('API request layer', () => {
       const projects = await app.inject({
         method: 'GET',
         url: '/v1/proof/work/projects',
+        headers: { cookie: session('a').cookie },
       });
       expect(projects.statusCode).toBe(403);
       expect(projects.json()).toEqual({
@@ -253,8 +325,12 @@ describe('API request layer', () => {
   test('tenant B sees Work only and only its own project', async () => {
     const b = fx().b;
 
-    await withApp(authenticateAs(principalFor(b)), async (app) => {
-      const context = await app.inject({ method: 'GET', url: '/v1/context' });
+    await withApp(async (app) => {
+      const context = await app.inject({
+        method: 'GET',
+        url: '/v1/context',
+        headers: { cookie: session('b').cookie },
+      });
       expect(context.statusCode).toBe(200);
       expect(context.json()).toEqual({
         userId: b.userId,
@@ -267,6 +343,7 @@ describe('API request layer', () => {
       const projects = await app.inject({
         method: 'GET',
         url: '/v1/proof/work/projects',
+        headers: { cookie: session('b').cookie },
       });
       expect(projects.statusCode).toBe(200);
       expect(projects.json()).toEqual({
@@ -285,6 +362,7 @@ describe('API request layer', () => {
       const employment = await app.inject({
         method: 'GET',
         url: '/v1/proof/people/employment',
+        headers: { cookie: session('b').cookie },
       });
       expect(employment.statusCode).toBe(403);
       expect(employment.json()).toEqual({
@@ -300,8 +378,12 @@ describe('API request layer', () => {
   test('tenant C is read-only inside read_until', async () => {
     const c = fx().cancelled;
 
-    await withApp(authenticateAs(principalFor(c)), async (app) => {
-      const context = await app.inject({ method: 'GET', url: '/v1/context' });
+    await withApp(async (app) => {
+      const context = await app.inject({
+        method: 'GET',
+        url: '/v1/context',
+        headers: { cookie: session('cancelled').cookie },
+      });
       expect(context.statusCode).toBe(200);
       expect(context.json()).toEqual({
         userId: c.userId,
@@ -314,6 +396,7 @@ describe('API request layer', () => {
       const employment = await app.inject({
         method: 'GET',
         url: '/v1/proof/people/employment',
+        headers: { cookie: session('cancelled').cookie },
       });
       expect(employment.statusCode).toBe(200);
       expect(employment.json()).toEqual({
@@ -334,11 +417,14 @@ describe('API request layer', () => {
     const a = fx().a;
     const b = fx().b;
 
-    await withApp(authenticateAs(principalFor(a)), async (app) => {
+    await withApp(async (app) => {
       const response = await app.inject({
         method: 'GET',
         url: `/v1/proof/people/employment?tenant_id=${b.tenantId}`,
-        headers: { 'x-tenant-id': b.tenantId },
+        headers: {
+          cookie: session('a').cookie,
+          'x-tenant-id': b.tenantId,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -360,10 +446,13 @@ describe('API request layer', () => {
     const a = fx().a;
     const b = fx().b;
     const c = fx().cancelled;
-    let current: Principal | null = principalFor(a);
 
-    await withApp(async () => current, async (app) => {
-      const first = await app.inject({ method: 'GET', url: '/v1/context' });
+    await withApp(async (app) => {
+      const first = await app.inject({
+        method: 'GET',
+        url: '/v1/context',
+        headers: { cookie: session('a').cookie },
+      });
       expect(first.statusCode).toBe(200);
       expect(first.json()).toMatchObject({
         userId: a.userId,
@@ -374,14 +463,18 @@ describe('API request layer', () => {
       const firstProof = await app.inject({
         method: 'GET',
         url: '/v1/proof/people/employment',
+        headers: { cookie: session('a').cookie },
       });
       expect(firstProof.statusCode).toBe(200);
       expect(firstProof.json().items.map((item: { id: string }) => item.id)).toEqual([
         a.employmentId,
       ]);
 
-      current = principalFor(b);
-      const second = await app.inject({ method: 'GET', url: '/v1/context' });
+      const second = await app.inject({
+        method: 'GET',
+        url: '/v1/context',
+        headers: { cookie: session('b').cookie },
+      });
       expect(second.statusCode).toBe(200);
       expect(second.json()).toMatchObject({
         userId: b.userId,
@@ -392,14 +485,18 @@ describe('API request layer', () => {
       const secondProof = await app.inject({
         method: 'GET',
         url: '/v1/proof/work/projects',
+        headers: { cookie: session('b').cookie },
       });
       expect(secondProof.statusCode).toBe(200);
       expect(secondProof.json().items.map((item: { id: string }) => item.id)).toEqual([
         b.project.id,
       ]);
 
-      current = principalFor(c);
-      const third = await app.inject({ method: 'GET', url: '/v1/context' });
+      const third = await app.inject({
+        method: 'GET',
+        url: '/v1/context',
+        headers: { cookie: session('cancelled').cookie },
+      });
       expect(third.statusCode).toBe(200);
       expect(third.json()).toMatchObject({
         userId: c.userId,
@@ -407,8 +504,11 @@ describe('API request layer', () => {
         role: 'employee',
       });
 
-      current = principalFor(a);
-      const fourth = await app.inject({ method: 'GET', url: '/v1/context' });
+      const fourth = await app.inject({
+        method: 'GET',
+        url: '/v1/context',
+        headers: { cookie: session('a').cookie },
+      });
       expect(fourth.statusCode).toBe(200);
       expect(fourth.json()).toMatchObject({
         userId: a.userId,
@@ -419,22 +519,19 @@ describe('API request layer', () => {
   });
 
   test('denied module routes return no items', async () => {
-    const a = fx().a;
-    const b = fx().b;
-    let current: Principal | null = principalFor(a);
-
-    await withApp(async () => current, async (app) => {
+    await withApp(async (app) => {
       const deniedProjects = await app.inject({
         method: 'GET',
         url: '/v1/proof/work/projects',
+        headers: { cookie: session('a').cookie },
       });
       expect(deniedProjects.statusCode).toBe(403);
       expect(deniedProjects.json()).not.toHaveProperty('items');
 
-      current = principalFor(b);
       const deniedEmployment = await app.inject({
         method: 'GET',
         url: '/v1/proof/people/employment',
+        headers: { cookie: session('b').cookie },
       });
       expect(deniedEmployment.statusCode).toBe(403);
       expect(deniedEmployment.json()).not.toHaveProperty('items');
@@ -443,27 +540,33 @@ describe('API request layer', () => {
 
   test('proof routes are not registered by default', async () => {
     await withApp(
-      authenticateAs(principalFor(fx().a)),
       async (app) => {
         const response = await app.inject({
           method: 'GET',
           url: '/v1/proof/people/employment',
+          headers: { cookie: session('a').cookie },
         });
         expect(response.statusCode).toBe(404);
       },
-      false,
+      { enableProofRoutes: false },
     );
   });
 
   test('unknown errors are a sanitized 500', async () => {
     const secret = 'select * from employment where id = 42';
-
-    await withApp(
-      async () => {
+    const brokenPool = {
+      connect: async () => {
         throw new Error(secret);
       },
+    } as unknown as RuntimePool;
+
+    await withApp(
       async (app) => {
-        const response = await app.inject({ method: 'GET', url: '/v1/context' });
+        const response = await app.inject({
+          method: 'GET',
+          url: '/v1/context',
+          headers: { cookie: session('a').cookie },
+        });
         expect(response.statusCode).toBe(500);
         expect(response.json()).toEqual({ error: { code: 'INTERNAL_ERROR' } });
         expect(response.body).not.toContain('select');
@@ -471,6 +574,7 @@ describe('API request layer', () => {
         expect(response.body).not.toContain('42');
         expect(response.body).not.toMatch(/stack/i);
       },
+      { pool: brokenPool },
     );
   });
 });

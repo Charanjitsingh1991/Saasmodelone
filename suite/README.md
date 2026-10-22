@@ -3,7 +3,7 @@
 This directory is the engineering project for **SaaSModels One**, the commercial product. It is deliberately separate from the marketing site at the repository root.
 
 > Status: **M0 foundation** · October 2026
-> The database, access helpers, a minimal API/worker request layer, membership verification and audited provisioning/entitlements exist. Identity, sessions, role/scope enforcement, production routes, queues, audit read APIs and UI are not implemented.
+> The database, access helpers, a minimal API/worker request layer, membership verification, audited provisioning/entitlements, email/password login, opaque server-side sessions and one-time invitation acceptance exist. Role/scope enforcement, password reset, MFA, OAuth, email delivery, tenant switching, session rotation and device lists, production routes, queues, audit read APIs and UI are not implemented.
 
 ## First slice
 
@@ -45,6 +45,7 @@ suite/
       0007_modules.sql       module catalog, dependencies, tenant entitlements
       0008_platform_access.sql  access helpers, read retention, module RLS policies
       0009_member_access.sql    active membership role helper
+      0010_identity.sql         auth sessions, invitations and auth-role lookup functions
     seed/
       0001_modules.sql       idempotent module catalog and dependency seed
 ```
@@ -66,15 +67,16 @@ Target: PostgreSQL 16+ (17 recommended), `pgcrypto` and `citext`, in the data re
 
 ```bash
 pnpm db:bootstrap   # roles and database, once
-pnpm db:migrate     # checksummed migrations; reapplies the runtime grants
+pnpm db:migrate     # checksummed migrations; reapplies runtime and auth grants
 pnpm db:seed        # idempotent module catalog
 pnpm db:provision --name "Synthetic Co" --slug synthetic-co --region test-region \
   --owner-email owner@example.test --owner-name "Synthetic Owner" --module people
+pnpm db:invite --tenant synthetic-co --email owner@example.test
 ```
 
 The module catalog is reference data, seeded once and updated by migration. A tenant is then granted entitlements; the catalog itself is not writable by the runtime role. Provisioning and entitlement changes run through owner-only libraries and audit in the same transaction.
 
-The migrations and seed are applied by the repository harness against a real local PostgreSQL 17 instance, with fresh-apply, checksum, role-privilege, access-helper, RLS policy, membership, provisioning and audit suites. PostgreSQL 16 in CI is planned for T10, and a restore drill is still required before real data — see `db/README.md` and `docs/roadmap.md`.
+The migrations and seed are applied by the repository harness against a real local PostgreSQL 17 instance, with fresh-apply, checksum, role-privilege, access-helper, RLS policy, membership, provisioning, audit and authentication suites. PostgreSQL 16 in CI is planned for T10, and a restore drill is still required before real data — see `db/README.md` and `docs/roadmap.md`.
 
 The application connects as a role that does **not** own the tables. Tenant and user context are set per transaction:
 
@@ -83,19 +85,19 @@ set local app.tenant_id = '<tenant-uuid>';
 set local app.user_id = '<user-uuid>';
 ```
 
-RLS denies all rows when the tenant setting is absent. Request routes resolve membership through `withMemberTransaction`; the worker uses the system-only `withTenantTransaction`. Tenant provisioning is owner-only and never reachable from the API.
+RLS denies all rows when the tenant setting is absent. Request routes resolve membership through `withMemberTransaction`; the worker uses the system-only `withTenantTransaction`. Identity lookups and session storage use a separate `saas_auth` role that never sees tenant business data. Tenant provisioning and invitation creation are owner-only and never reachable from the API.
 
 ## Application skeleton
 
-`apps/api` and `apps/worker` contain the first request layer. API routes use `withMemberTransaction` from `@saasmodels/db`: the tenant and user come only from the injected principal, both IDs are validated, the active membership role resolves first, then platform access and the module gate run through the runtime role, and the caller's query runs in the same transaction. The context route returns the resolved role. The worker exports `runTenantJob` on the system-only `withTenantTransaction` without a queue or polling loop.
+`apps/api` and `apps/worker` contain the first request layer. `POST /v1/auth/login` verifies an email and password with Argon2id, resolves the tenant by slug through the auth role, and issues an opaque `saas_session` cookie plus a CSRF token. Identity is global (`app_user.email` is unique) and memberships are per tenant, so the same password signs a user in to each tenant it belongs to. `POST /v1/auth/invitations/accept` consumes a one-time invitation, activates the invited membership and signs the user in; a first-time invitee sets a password, while an active user invited to a second tenant verifies its existing one. Protected routes read the session cookie only, verify the hashed session server-side, then call `withMemberTransaction` from `@saasmodels/db` with the session's tenant and user: both IDs are validated, the active membership role resolves first, then platform access and the module gate run through the runtime role, and the caller's query runs in the same transaction. The context route returns the resolved role. State-changing requests require an exact Origin match, logout requires the session CSRF token, login is rate-limited per source address and per email, and every `/v1/auth/*` response is `Cache-Control: no-store`. The worker exports `runTenantJob` on the system-only `withTenantTransaction` without a queue or polling loop.
 
-Proof routes are disabled by default and enabled only by tests. The executable API authenticator returns no principal and logs that identity is not configured, so `/health` is the only route that can succeed until real identity lands. Authentication, sessions, invitations, role/scope enforcement and denied-request auditing are not implemented; do not treat this skeleton as a production authentication layer.
+Proof routes are disabled by default and enabled only by tests. There is no web login UI, password reset, MFA, OAuth, email delivery, tenant switching, device list, session rotation or distributed rate limiting. Role/scope enforcement and denied-request auditing are not implemented; do not treat this skeleton as a production authentication layer.
 
-Provisioning and entitlement changes are owner-only libraries used by the `db:provision` CLI. They are not routed through the API.
+Provisioning and entitlement changes are owner-only libraries used by the `db:provision` CLI; invitations are created by the owner-only `db:invite` CLI. None is routed through the API.
 
 ## What comes next
 
-1. Replace the API's null authenticator with real identity, invitation acceptance and sessions; then add role/scope authorization and denied-request audit.
+1. Add role/scope authorization and denied-request audit on top of the existing session principal; then password reset with email delivery, MFA, session rotation/device lists and distributed rate limiting.
 2. Build the People vertical: person, employment, salary structure, payroll run, payslip.
 3. Build Switch against CSV first, then greytHR; prove reconciliation before adding a second connector.
 4. Put one design partner's migrated history through a sandbox rehearsal.

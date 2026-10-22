@@ -127,7 +127,7 @@ Test the ugly cases: blank rows, duplicate tax-ID/email, Unicode names, Excel da
 
 The API and worker share one tenant transaction helper, and the same suites prove both surfaces:
 
-- The principal is injected by the caller; missing or malformed principals fail before data is read. No header, query string, body or cookie can supply a tenant.
+- The principal comes only from a valid `saas_session` cookie resolved server-side. Missing, malformed, expired, revoked or tampered cookies fail with 401 before data is read. No header, query string, body or other cookie can supply a tenant; `x-tenant-id` and a `tenant_id` parameter are ignored.
 - Request routes resolve an active membership before platform access. A non-member or suspended member receives `MEMBERSHIP_DENIED` even when the tenant is suspended, so tenant state is not disclosed. A member of a suspended, closed or deleted tenant receives `PLATFORM_ACCESS_DENIED`.
 - A user with a valid membership in tenant A cannot use that user ID with tenant B.
 - The resolved role is passed to the route callback and returned by `/v1/context`. An unknown stored role is a data-integrity error, never a permissive default. Role and scope enforcement is not implemented yet.
@@ -137,7 +137,7 @@ The API and worker share one tenant transaction helper, and the same suites prov
 - Reusing one pool for sequential tenants and users does not leak `app.tenant_id`, `app.user_id` or the resolved role.
 - A denied gate or a failed callback rolls back; a callback error persists nothing.
 
-These suites use the real database and the runtime role, not mocks. They sit above the table-level denial suite; authentication, sessions and authorization are not implemented yet.
+These suites use the real database, the runtime and auth roles, real Argon2 verification and real cookies, not mocks. They sit above the table-level denial suite. Role and scope enforcement is still not implemented.
 
 ### 2.8 Provisioning, membership and entitlements
 
@@ -175,6 +175,27 @@ Every licensable module must pass the same test before it is sold alone:
 
 If a module cannot pass this, it is a feature of another module and must not be priced alone.
 
+### 2.11 Authentication, sessions and invitations
+
+Covered by `tests/authentication.test.ts` against disposable PostgreSQL with the real auth role, real Argon2 hashing and real cookies:
+
+- Hash/verify roundtrip; wrong password and malformed hash return false without throwing; password boundaries at 11, 12, 128 and 129 characters; no trimming.
+- Argon2id parameters and hash prefix; no plaintext password stored.
+- Session tokens are random, returned once and stored only as a SHA-256 hash. CSRF tokens are independent.
+- Cookie attributes: `HttpOnly`, `SameSite=Strict`, `Path=/`, 12-hour `Max-Age`, and `Secure` when configured.
+- Login success updates `last_login_at` and creates one session. Wrong password, unknown email, non-member, suspended membership, invited, disabled user, suspended user, wrong tenant and deleted tenant all return the same 401 with no session.
+- A session for tenant A cannot read tenant B; `x-tenant-id` is ignored.
+- Invitation creation hashes the token, expires by default in 7 days, and a newer invitation revokes the older one. Acceptance activates the user and membership exactly once; reuse, expiry, revocation, an unknown token, a weak password, a suspended or disabled user and a deleted tenant fail without changes. An active user invited to a second tenant accepts with its existing password, which is unchanged, and can then sign in to both tenants; a wrong password leaves the membership invited and creates no session. An active user with no password cannot be invited.
+- Expired, revoked, tampered and disabled-user sessions fail with 401. A suspended membership fails with 403 `MEMBERSHIP_DENIED`; a suspended tenant fails with 403 `PLATFORM_ACCESS_DENIED`. A suspended tenant can still authenticate, and is denied on the protected route.
+- Logout without or with a wrong CSRF token returns 403 and leaves the session valid; the correct token returns 204, clears the cookie and revokes only that session.
+- State-changing requests without an exact Origin return 403. Malformed JSON and schema violations return 400; an unsupported content type returns 415; an oversized body returns 413.
+- Rate limits are enforced per bucket (`2` → third login for the same email, or second invitation acceptance from the same address, returns 429); a per-address login limit also trips across different emails from one address.
+- Every `/v1/auth/*` response, including 401 errors and the 204 logout, carries `Cache-Control: no-store`.
+- No response contains a password hash, a raw session token or SQL text.
+- The auth-role privilege matrix is asserted in `tests/harness.test.ts`: identity column grants only, membership status reachable only through `app.auth_membership_status` (no direct `membership` grant and no `app.current_tenant_id()` execute), no access to business data, catalog, entitlements or audit, no DDL or `TRUNCATE`; the runtime role cannot read or write `auth_session` or `invitation`.
+
+Not covered yet: browser login and invitation screens (none exist), email delivery, password reset, MFA, OAuth, session rotation, device lists, distributed rate limiting and authentication-event audit.
+
 ---
 
 ## 3. Test data
@@ -195,6 +216,7 @@ A merge is blocked when any of these fail:
 - Unit, contract and integration tests.
 - Tenant isolation suite.
 - Module entitlement suite, including expiry, cancellation, dependency degradation and catalog write protection.
+- Authentication and session suite: login, invitation acceptance, cookie attributes, session expiry/revocation, CSRF/Origin checks and the auth-role privilege matrix.
 - Authorization matrix.
 - Payroll golden cases for the current and previous rule-pack versions in every covered jurisdiction.
 - Migration fixture → reconciliation → promotion → export.
@@ -202,7 +224,7 @@ A merge is blocked when any of these fail:
 - Secret scan.
 - Schema migration applies cleanly to an empty database and to the previous version.
 
-Browser end-to-end tests cover: sign-in, invite, employee onboarding, leave request/approval, payroll draft → finalise, import rehearsal → sign-off, invoice creation, module enablement on an existing tenant, and export.
+Browser end-to-end tests cover: sign-in, invite, employee onboarding, leave request/approval, payroll draft → finalise, import rehearsal → sign-off, invoice creation, module enablement on an existing tenant, and export. None of these browser tests exist yet; authentication is currently proven at the API and database layers only.
 
 ---
 

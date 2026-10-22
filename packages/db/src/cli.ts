@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { Pool } from 'pg';
+import { AuthError, createInvitation } from './auth.js';
 import { bootstrap } from './bootstrap.js';
 import { migrate } from './migrate.js';
 import { provisionTenant, ProvisioningError, type ProvisionTenantInput } from './provision.js';
@@ -95,6 +96,63 @@ function parseProvisionArgs(args: string[]): ProvisionTenantInput {
   };
 }
 
+type InviteArgs = {
+  tenantSlug: string;
+  email: string;
+  days?: number;
+};
+
+function nextInviteValue(args: string[], index: number, flag: string): string {
+  const value = args[index + 1];
+  if (value === undefined || value.startsWith('--')) {
+    throw new AuthError('INVALID_INVITATION_INPUT', `${flag} requires a value`);
+  }
+  return value;
+}
+
+function parseInviteArgs(args: string[]): InviteArgs {
+  let tenantSlug: string | undefined;
+  let email: string | undefined;
+  let days: number | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const flag = args[index];
+    switch (flag) {
+      case '--tenant':
+        tenantSlug = nextInviteValue(args, index, flag);
+        index += 1;
+        break;
+      case '--email':
+        email = nextInviteValue(args, index, flag);
+        index += 1;
+        break;
+      case '--days': {
+        const value = nextInviteValue(args, index, flag);
+        days = Number(value);
+        if (!Number.isInteger(days)) {
+          throw new AuthError('INVALID_INVITATION_INPUT', '--days must be an integer');
+        }
+        index += 1;
+        break;
+      }
+      default:
+        throw new AuthError(
+          'INVALID_INVITATION_INPUT',
+          `Unknown invite option ${flag}`,
+        );
+    }
+  }
+
+  if (!tenantSlug || !email) {
+    throw new AuthError(
+      'INVALID_INVITATION_INPUT',
+      'Usage: db:invite --tenant <slug> --email <email> [--days 7]',
+    );
+  }
+
+  return { tenantSlug, email, ...(days === undefined ? {} : { days }) };
+}
+
 async function main(): Promise<void> {
   const command = process.argv[2];
 
@@ -104,6 +162,7 @@ async function main(): Promise<void> {
         adminUrl: required('DB_ADMIN_URL'),
         ownerPassword: required('SAAS_OWNER_PASSWORD'),
         runtimePassword: required('SAAS_RUNTIME_PASSWORD'),
+        authPassword: required('SAAS_AUTH_PASSWORD'),
         log,
       });
       log({ event: 'bootstrap.complete', ...result });
@@ -134,8 +193,44 @@ async function main(): Promise<void> {
       }
       return;
     }
+    case 'invite': {
+      const input = parseInviteArgs(process.argv.slice(3));
+      const pool = new Pool({ connectionString: required('DB_OWNER_URL') });
+      try {
+        const invitation = await createInvitation(pool, {
+          tenantSlug: input.tenantSlug,
+          email: input.email,
+          ...(input.days === undefined ? {} : { expiresInDays: input.days }),
+        });
+        const tenant = await pool.query<{ id: string }>(
+          'select id from tenant where slug = $1',
+          [input.tenantSlug],
+        );
+        const tenantId = tenant.rows[0]?.id;
+        if (!tenantId) {
+          throw new AuthError(
+            'INVALID_INVITATION_INPUT',
+            `Tenant ${input.tenantSlug} was not found`,
+          );
+        }
+        log({
+          event: 'invite.complete',
+          invitationId: invitation.invitationId,
+          tenantId,
+          email: input.email,
+          expiresAt: invitation.expiresAt.toISOString(),
+          token: invitation.token,
+          warning:
+            'Treat this invitation token as a secret and deliver it out of band. ' +
+            'It is shown once and cannot be retrieved again.',
+        });
+      } finally {
+        await pool.end();
+      }
+      return;
+    }
     default:
-      throw new Error('Usage: cli.ts <bootstrap|migrate|seed|provision>');
+      throw new Error('Usage: cli.ts <bootstrap|migrate|seed|provision|invite>');
   }
 }
 

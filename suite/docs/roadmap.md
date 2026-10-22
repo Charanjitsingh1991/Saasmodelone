@@ -15,7 +15,7 @@ Deliverables:
 - Module catalog, dependency declarations, tenant entitlements and organisation provisioning.
 - Shared person and client directory, owned by the platform rather than a module.
 - PostgreSQL schema applied to a local instance and reviewed by a second engineer.
-- API/worker skeleton with tenant-context and entitlement middleware, plus a test harness.
+- API/worker skeleton with tenant-context and entitlement middleware; email/password login, opaque server-side sessions and one-time invitation acceptance; plus a test harness.
 - CI pipeline with type check, lint, tests, secret scan and dependency audit.
 - Threat model reviewed; design-partner gate drafted.
 
@@ -28,13 +28,15 @@ Exit criteria:
 - Migrations and the module seed apply cleanly to an empty database and roll forward from the previous version.
 - A signed-in user can reach an empty People screen and sees only the modules the tenant is entitled to.
 
+Progress (October 2026): database and API tests prove tenant isolation, platform access, module entitlement and the auth-role boundary with real sessions. Email/password login, session validation, logout and one-time invitation acceptance exist. M0 has **not** exited: there is no web UI, production People route, role/scope enforcement or payroll, so the signed-in People-screen criterion and the CI/secret-scan items remain open.
+
 ## M1 — Internal People payroll
 
 **Goal:** run one payroll correctly for a synthetic 150-person company.
 
 Scope:
 
-- Identity, membership, roles and audit.
+- Role and scope authorization on top of the existing identity, membership, session and audit foundations.
 - Module-aware authorization: entitlement, then role, then scope.
 - Person, employment, compensation, bank and jurisdiction-scoped identifiers.
 - Salary structures and payroll inputs.

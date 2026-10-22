@@ -169,8 +169,8 @@ Events carry identifiers, not large payloads. Consumers must be idempotent, and 
 
 ## 5. Request path and tenancy
 
-1. Authenticate the session or API key.
-2. Resolve the organisation from the URL, session or API key scope.
+1. Authenticate the request. In M0 the browser presents an opaque `saas_session` cookie; the API hashes the token and checks expiry, revocation and an active user through the auth role. API keys, OAuth and SSO are target state.
+2. Take the organisation from the authenticated session record. No header, query string, body or other cookie can choose the tenant.
 3. Verify an active membership for that user/organisation.
 4. Open a transaction and run `set local app.tenant_id = '<uuid>'`.
 5. Check that the module is entitled and active for the tenant.
@@ -179,7 +179,18 @@ Events carry identifiers, not large payloads. Consumers must be idempotent, and 
 8. Append audit events and domain events in the same transaction.
 9. Commit.
 
-`app.tenant_id` is transaction-local. Connection pooling must never leak it. The runtime role does not own tables and cannot bypass RLS. Tenant provisioning and login-time membership discovery use a privileged path that is not exposed to normal requests.
+`app.tenant_id` is transaction-local. Connection pooling must never leak it. The runtime role does not own tables and cannot bypass RLS. Tenant provisioning and invitation creation use an owner-only path that is not exposed to normal requests. Identity lookups and session storage use a separate `saas_auth` role, which has no access to tenant business data, the module catalog, entitlements or audit.
+
+Current authentication shape:
+
+- Email and password with Argon2id (19,456 KiB, time cost 2, parallelism 1), a tenant slug and a uniform failure response for every rejection.
+- A 32-byte opaque session token in an `HttpOnly`, `SameSite=Strict`, `Path=/` cookie, `Secure` when configured, with a 12-hour absolute expiry. The database stores only its SHA-256 hash.
+- A CSRF token returned to the client and required on logout; every state-changing request must carry an exact `Origin` match. There is no CORS configuration and no Referer fallback.
+- One-time invitations created by the owner-only `db:invite` CLI: hashed at rest, 7-day default expiry, older unconsumed invitations revoked when a new one is issued. Acceptance activates the invited membership and creates a session in one transaction. A first-time invitee sets a password; an active user invited to a second tenant verifies its existing password instead, which is never replaced. Identity is global (`app_user.email` is unique) while memberships are per tenant, so one user can sign in to each of its tenants with the same password.
+- Login is rate-limited in memory per process by source address and additionally per email; invitation acceptance is rate-limited per source address. The limiter keys on the observed socket address, so behind a proxy without `trustProxy` every client shares the proxy address. It is not a distributed limiter and not a substitute for edge/WAF controls.
+- Auth responses (`/v1/auth/*`), including errors and logout, are sent with `Cache-Control: no-store`.
+
+Not built: password reset, email delivery, MFA, OAuth/SSO, SCIM, tenant switching, session rotation, device lists, a distributed rate limiter, authentication-event audit, a login UI, and role/scope enforcement. A valid session proves identity only; it does not authorize an action.
 
 `app.has_module_read('<code>')` and `app.has_module_write('<code>')` are the tenant-scoped, security-definer helpers for database checks, and module tables carry restrictive RLS policies built on them (installed idempotently by `app.apply_module_policies()`). `app.has_active_module('<code>')` remains only as an exact alias of the write helper. Application services must still enforce entitlement explicitly; the helpers are a second line of defence, not a replacement for the policy layer.
 

@@ -38,8 +38,8 @@ Threats we design against first:
 - Cross-tenant foreign keys are prevented with composite `(tenant_id, id)` references.
 - Tenant context is cleared when a pooled connection is returned.
 - Automated table-level tests prove the restrictive module policies on the two M0 proof tables, `employment` (People) and `project` (Work): entitled access, denial for an unentitled module on an entitled tenant, denial for suspended, closed and deleted tenants holding an active entitlement, denial of cross-tenant reads and writes, and read-only access for a cancelled entitlement inside `read_until`. The matrix expands with each runtime table grant; it does not yet cover every tenant table.
-- The API and worker share one tenant transaction: the injected principal is the only source of tenant identity, and no header, query string, body or cookie is trusted for it. Request routes use `withMemberTransaction`: both IDs are validated, `app.tenant_id` and `app.user_id` are set transaction-locally, and an active membership role is resolved before platform access and the module gate. A non-member or suspended member receives `MEMBERSHIP_DENIED` before tenant state is disclosed; a member of a suspended, closed or deleted tenant receives `PLATFORM_ACCESS_DENIED`. The worker uses `withTenantTransaction`, which is system-only and does not check membership. Authentication, sessions, passwords and invitations are not implemented; the current principal is injected by the caller. Role and scope enforcement is not built, and `/v1/context` returning a role is not authorization.
-- Tenant provisioning is an owner-only library and CLI, never an API route. It creates the tenant, owner user, owner membership, entitlements and a `tenant.provisioned` audit event in one transaction, and prints only IDs. The runtime role has no `INSERT` on `tenant`. Login-time membership discovery is not built; the membership helper only resolves an already-supplied tenant and user.
+- The API and worker share one tenant transaction. For request routes, the only source of tenant identity is the server-side session record resolved from the `saas_session` cookie; no header, query string, body or other cookie is trusted for it, and the raw token is never stored. Request routes use `withMemberTransaction`: both IDs are validated, `app.tenant_id` and `app.user_id` are set transaction-locally, and an active membership role is resolved before platform access and the module gate. A non-member or suspended member receives `MEMBERSHIP_DENIED` before tenant state is disclosed; a member of a suspended, closed or deleted tenant receives `PLATFORM_ACCESS_DENIED`. The worker uses `withTenantTransaction`, which is system-only and does not check membership. Email/password login, opaque hashed sessions and one-time invitation acceptance exist; MFA, OAuth, password reset, email delivery, session rotation, device lists, a distributed rate limiter and authentication-event audit do not. Role and scope enforcement is not built, and `/v1/context` returning a role is not authorization.
+- Tenant provisioning is an owner-only library and CLI, never an API route. It creates the tenant, owner user, owner membership, entitlements and a `tenant.provisioned` audit event in one transaction, and prints only IDs. The runtime role has no `INSERT` on `tenant`. Invitation creation is also an owner-only CLI, not an API route. Login is scoped to a supplied tenant slug; there is no cross-tenant email discovery or tenant switching.
 - `FORCE ROW LEVEL SECURITY` is not enabled in a migration. A readiness test temporarily forces it on `tenant`, proves that provisioning still sets `app.tenant_id` before the tenant insert, and resets it. Global reference tables and `infra.schema_migration` are never forced.
 
 ## 3. Module entitlements
@@ -60,13 +60,22 @@ Threats we design against first:
 
 ## 4. Identity and sessions
 
-- Email/password with Argon2id hashing; Google and Microsoft OAuth.
-- MFA required for owners, admins, HR and finance; available to everyone.
-- Short-lived sessions with rotation, server-side revocation and a device list.
-- SSO (SAML/OIDC) and SCIM at enterprise tier.
-- API keys are scoped, hashed at rest, shown once, and revocable.
-- Brute-force and credential-stuffing protection at the edge.
-- No shared accounts. Support access requires explicit, time-boxed, audited impersonation consent.
+Implemented in M0:
+
+- Email/password with Argon2id (19,456 KiB, time cost 2, parallelism 1, 32-byte output). Passwords are 12–128 characters, never trimmed, with no composition rules. A missing email, wrong password, non-member, suspended membership or ineligible user all perform an Argon2 verification and return the same `INVALID_CREDENTIALS` response.
+- Identity is global: `app_user.email` is unique across the platform, one row per person. Memberships are per tenant, so one user can hold a membership in several tenants. Login requires a tenant slug and selects that user's membership in that tenant; the same password is used across all of that user's memberships. There is no cross-tenant email discovery or tenant switching.
+- Opaque sessions: 32 random bytes carried in an `HttpOnly`, `SameSite=Strict`, `Path=/` cookie, `Secure` when configured, with a 12-hour absolute expiry. Only the SHA-256 hash is stored. Logout requires the session's CSRF token and revokes only the presented session.
+- One-time invitations created by the owner-only `db:invite` CLI, hashed at rest, 7-day default expiry (1–30 days). Creation revokes older unconsumed invitations for the same membership. Acceptance activates the invited membership and creates a session in one transaction. A first-time invitee sets a password; an already-active user invited to a second tenant keeps and verifies its existing password, which is never replaced. Acceptance is rejected if the user is active but has no password, or if the password does not match.
+- State-changing requests require an exact `Origin` match. Login is rate-limited in memory per process by source address and additionally per email; invitation acceptance is rate-limited per source address. The limiter uses the observed socket address, so behind a proxy without `trustProxy` all clients share the proxy address; it is not a distributed limiter and not a replacement for edge protection.
+- Every login creates one session. A session proves identity only; it does not authorize a role or scope.
+
+Target controls, not built:
+
+- MFA for owners, admins, HR and finance; OAuth (Google and Microsoft), SSO (SAML/OIDC) and SCIM.
+- Password reset and email delivery, session rotation, device lists and session management UI.
+- Scoped, hashed, one-time-displayed API keys.
+- Edge brute-force and credential-stuffing protection beyond the per-process limiter.
+- Time-boxed, audited support impersonation. No shared accounts.
 
 ## 5. Authorization
 
@@ -131,6 +140,8 @@ Before the first real dataset is imported:
 
 - [ ] Tenant isolation tests pass for every table.
 - [ ] Entitlement tests pass: no access to an unlicensed, expired or cancelled module; no dependency leak.
+- [ ] Invitation, login, logout and session-expiry paths exercised against a disposable database; MFA, password reset, email delivery and edge rate limiting configured.
+- [ ] Role and scope authorization implemented. A valid session alone grants no action.
 - [ ] DPA and security schedule signed.
 - [ ] Named security owner and incident contact exchanged.
 - [ ] Read-only source credentials verified; no write scope.

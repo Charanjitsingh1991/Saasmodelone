@@ -1,22 +1,62 @@
 import { pathToFileURL } from 'node:url';
-import { assertLocalDatabaseUrl, createRuntimePool } from '@saasmodels/db';
+import {
+  assertLocalDatabaseUrl,
+  createAuthPool,
+  createRuntimePool,
+} from '@saasmodels/db';
 import { createServer } from './server.js';
 
+function required(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`${name} is required`);
+  }
+  return value;
+}
+
+function readAppOrigin(): string {
+  const raw = required('APP_ORIGIN');
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error('APP_ORIGIN must be an absolute http(s) origin');
+  }
+  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.origin !== raw) {
+    throw new Error('APP_ORIGIN must be an http(s) origin without a path');
+  }
+  return raw;
+}
+
+function readSecureCookies(): boolean {
+  const raw = process.env.COOKIE_SECURE?.trim();
+  if (!raw) {
+    return process.env.NODE_ENV === 'production';
+  }
+  if (raw === 'true') {
+    return true;
+  }
+  if (raw === 'false') {
+    return false;
+  }
+  throw new Error('COOKIE_SECURE must be true or false');
+}
+
 async function start(): Promise<void> {
-  const connectionString = assertLocalDatabaseUrl(
-    'DB_RUNTIME_URL',
-    process.env.DB_RUNTIME_URL,
-  );
-  const pool = createRuntimePool(connectionString);
+  const runtimeUrl = assertLocalDatabaseUrl('DB_RUNTIME_URL', process.env.DB_RUNTIME_URL);
+  const authUrl = assertLocalDatabaseUrl('DB_AUTH_URL', process.env.DB_AUTH_URL);
+  const appOrigin = readAppOrigin();
+  const secureCookies = readSecureCookies();
+
+  const pool = createRuntimePool(runtimeUrl);
+  const authPool = createAuthPool(authUrl);
   const app = createServer({
     pool,
-    authenticate: async () => null,
+    authPool,
+    appOrigin,
+    secureCookies,
     logger: true,
   });
-
-  app.log.warn(
-    'Identity is not configured: every protected route returns 401 until an authenticator is wired.',
-  );
 
   const port = Number(process.env.API_PORT ?? 3001);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -33,6 +73,7 @@ async function start(): Promise<void> {
     shuttingDown = true;
     app.log.info({ signal }, 'shutting down');
     await app.close();
+    await authPool.end();
     await pool.end();
   };
 
