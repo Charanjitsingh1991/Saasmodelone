@@ -102,7 +102,7 @@ Each tenant has at most one entitlement per module:
 
 - `trialing` — time-bound evaluation.
 - `active` — licensed and usable.
-- `suspended` — non-payment or administrative hold; reads and export remain available, writes stop.
+- `suspended` — non-payment or administrative hold; reads and export remain available inside the original entitlement term, writes stop. After the term ends, retention must be expressed as `cancelled` with `read_until`.
 - `cancelled` — no longer licensed; data is retained read-only for the contractual window, then exported and purged.
 
 Entitlements carry a start date, an optional end date, a seat unit and a seat count. Contracts, trials and internal tenants are the only sources. The billing system produces entitlements; the product does not infer a licence from an invoice PDF.
@@ -181,7 +181,7 @@ Events carry identifiers, not large payloads. Consumers must be idempotent, and 
 
 `app.tenant_id` is transaction-local. Connection pooling must never leak it. The runtime role does not own tables and cannot bypass RLS. Tenant provisioning and login-time membership discovery use a privileged path that is not exposed to normal requests.
 
-`app.has_active_module('<code>')` is a tenant-scoped, security-definer helper for database checks. Application services must still enforce entitlement explicitly; the helper is a second line of defence, not a replacement for the policy layer.
+`app.has_module_read('<code>')` and `app.has_module_write('<code>')` are the tenant-scoped, security-definer helpers for database checks, and module tables carry restrictive RLS policies built on them (installed idempotently by `app.apply_module_policies()`). `app.has_active_module('<code>')` remains only as an exact alias of the write helper. Application services must still enforce entitlement explicitly; the helpers are a second line of defence, not a replacement for the policy layer.
 
 See [`adr/0002-postgres-rls-tenancy.md`](adr/0002-postgres-rls-tenancy.md) and [`adr/0005-modules-and-entitlements.md`](adr/0005-modules-and-entitlements.md).
 

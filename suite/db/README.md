@@ -25,7 +25,7 @@ The runtime grant allowlist is [packages/db/sql/runtime-grants.sql](../../packag
 
 - `USAGE` on `public` and `app`, but no `CREATE`.
 - `SELECT` on the module catalog, dependencies and entitlements only. Later milestones add explicit grants per table and command as those read and write paths land.
-- `EXECUTE` on `app.current_tenant_id()` only. Administrative procedures (`enable_tenant_rls`, `add_updated_at`), trigger functions and `has_active_module` are revoked.
+- `EXECUTE` on `app.current_tenant_id()`, the four access helpers (`has_platform_access`, `has_module_read`, `has_module_write`, `has_switch_access`) and the `has_active_module` compatibility alias (an exact delegate to `has_module_write`). Administrative procedures (`enable_tenant_rls`, `add_updated_at`, `apply_module_policies`) and trigger functions are revoked.
 
 There is no blanket `GRANT ON ALL TABLES` and no default privileges grant. The runtime cannot write the module catalog or its dependencies, cannot truncate, and cannot create objects.
 
@@ -51,7 +51,7 @@ Tenant creation and login-time membership lookup happen through a separate privi
 - Sensitive identifiers: application-encrypted ciphertext plus a `last4` fragment. Never plaintext tax IDs, social-insurance numbers or bank account numbers.
 - Money: `bigint` minor units plus a required ISO currency. Currency is never defaulted in the schema.
 - Jurisdiction, statutory identifier types, payroll rule packs, their rules, the module catalog and module dependencies are global reference data. Give the runtime role `select` only; seed and change them through a reviewed administrative path.
-- Module entitlements are tenant data. The runtime may read them; changes come from the contract, billing or provisioning path and are audited. `app.has_active_module(code)` is a tenant-scoped second line of defence, not a replacement for the API policy check.
+- Module entitlements are tenant data. The runtime may read them; changes come from the contract, billing or provisioning path and are audited. Module tables carry restrictive RLS policies built on `app.has_module_read(code)` / `app.has_module_write(code)`, which require an active, non-deleted tenant through `app.has_platform_access()`; `app.has_active_module(code)` is the write alias. These are a second line of defence, not a replacement for the API policy check.
 - `person` and `client` are shared directory records. A module may extend them but may not create a competing person or client.
 - `audit_event` is append-only; updates and deletes raise an error.
 - `source_system`, `source_id`, `import_batch_id`, `imported_at` on importable production tables.
@@ -66,7 +66,8 @@ Tenant creation and login-time membership lookup happen through a separate privi
 | `0004_content.sql` | content_item, content_version, asset, content_asset, document_room, document_room_member |
 | `0005_money.sql` | proposal, proposal_line, contract, invoice, invoice_line, tax_line, payment, payment_allocation, credit_note, expense, vendor, vendor_bill |
 | `0006_migration.sql` | import_batch, import_file, mapping_profile, import_row, import_issue, reconciliation |
-| `0007_modules.sql` | platform_module, platform_module_dependency, module_entitlement, app.has_active_module() |
+| `0007_modules.sql` | platform_module, platform_module_dependency, module_entitlement |
+| `0008_platform_access.sql` | tenant.is_internal, module_entitlement.read_until, app.has_platform_access(), app.has_module_read(), app.has_module_write(), app.has_switch_access(), app.has_active_module() (alias), app.apply_module_policies() and the module RLS policies |
 
 `person` is created in `0002_people.sql` and `client` in `0003_work.sql`, but both are shared directory records. Ownership is the architecture contract, not the migration filename.
 

@@ -49,7 +49,7 @@ Entitlements are a security boundary, not a billing detail.
 1. Tenant A has People and CRM active; Work is not entitled.
 2. Every Work route, API endpoint, search result, export and background job denies Tenant A.
 3. A direct SQL call to a Work table under `app.tenant_id = A` is denied by the module policy even if the role would otherwise allow it.
-4. Set the Content entitlement to `trialing` with an end date in the past; assert `app.has_active_module('content')` is false and every Content request is denied.
+4. Set the Content entitlement to `trialing` with an end date in the past; assert `app.has_module_read('content')` and `app.has_module_write('content')` are false (`app.has_active_module` is the write alias) and every Content request is denied.
 5. Set a module to `cancelled`; assert access is denied but records remain in the database and are exportable under the retention rule.
 6. Attempt a cross-tenant entitlement update or insert; assert zero rows and an RLS error.
 7. Attempt to write the module catalog as the runtime role; assert permission denied.

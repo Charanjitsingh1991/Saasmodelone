@@ -39,13 +39,17 @@ Threats we design against first:
 - Tenant context is cleared when a pooled connection is returned.
 - Automated tests attempt cross-tenant reads and writes for every table and fail the build on success.
 - Tenant provisioning and login-time membership lookup use a narrow privileged path, audited separately.
+- `FORCE ROW LEVEL SECURITY` is not enabled yet. The `tenant` table gains it only when the provisioning path sets `app.tenant_id` before inserting the tenant row and that path is tested; global reference tables and `infra.schema_migration` are never forced.
 
 ## 3. Module entitlements
 
 - The module catalog (`platform_module`, `platform_module_dependency`) is reference data. The runtime role can read it and cannot write it.
-- Each tenant has `module_entitlement` rows for licensed modules, with status, seat unit, start/end dates and contract reference. RLS scopes entitlements to the tenant.
+- Each tenant has `module_entitlement` rows for licensed modules, with status, seat unit, start/end dates and contract reference. RLS scopes entitlements to the tenant. `read_until` is set if and only if the entitlement is cancelled; it is null for every other state.
 - Authorization order is **entitlement → role → scope**. A user with the right role in the wrong module is still denied.
-- `app.has_active_module('<code>')` is a security-definer helper used as a second line of defence in RLS policies and database functions. It requires the module to be licensable, in an available/preview catalog state, and within its entitlement window.
+- Module access has one database definition, split by operation: `app.has_module_read('<code>')` and `app.has_module_write('<code>')`, both security-definer. Every module helper first requires `app.has_platform_access()`: a tenant context is set and the tenant is active and not deleted. Write requires a trialing/active entitlement inside its window; read additionally allows suspended entitlements inside their original term and cancelled entitlements inside `read_until`. Post-term retention is `cancelled` plus `read_until`, never a stale suspension. Public tenants can use only `available`/`preview` catalog modules; `planned` modules require `tenant.is_internal` and an internal-source entitlement. `app.has_active_module('<code>')` is the exact delegate to the write helper, kept for compatibility; new SQL uses the read/write helpers, and no helper is ever called with `'core'` or `'switch'`.
+- Module tables carry `as restrictive` RLS policies installed by the idempotent, owner-only procedure `app.apply_module_policies()`; the runtime role has no `EXECUTE` on it. Switch staging is gated by `app.has_switch_access()` — any trialing/active licensable entitlement inside its window and an active tenant — never by a Switch entitlement.
+- `tenant.is_internal` is set only by the provisioning path; the runtime role has no `UPDATE` on `tenant`.
+- Tenant-level suspension, closure and soft deletion are denied at both layers: `app.has_platform_access()` at the request layer, and every module RLS policy through the module helpers.
 - Cancellation and expiry remove access but never delete module data. Read/export access for a cancelled module is an explicit retention decision, not a side effect of the entitlement being absent.
 - Entitlement changes are audited with actor, module, previous state and new state.
 - A dependency that is optional does not imply a licence: Work can run without CRM or People, and the UI must hide or degrade the dependent feature rather than leak data from an unlicensed module.

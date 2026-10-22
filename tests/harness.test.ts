@@ -48,7 +48,7 @@ afterAll(async () => {
 describe('local database harness', () => {
   test('fresh apply records every baseline migration and creates the schema', async () => {
     const expected = await listSqlFiles(migrationsDir);
-    expect(expected).toHaveLength(7);
+    expect(expected).toHaveLength(8);
 
     const result = await migrate({ ownerUrl: db().ownerUrl });
     expect(result.applied).toEqual(expected);
@@ -94,6 +94,11 @@ describe('local database harness', () => {
           'add_updated_at',
           'block_mutation',
           'has_active_module',
+          'has_platform_access',
+          'has_module_read',
+          'has_module_write',
+          'has_switch_access',
+          'apply_module_policies',
         ]),
       );
     } finally {
@@ -303,20 +308,35 @@ describe('runtime role privileges', () => {
         add_updated_at: boolean;
         block_mutation: boolean;
         has_active_module: boolean;
+        has_platform_access: boolean;
+        has_module_read: boolean;
+        has_module_write: boolean;
+        has_switch_access: boolean;
+        apply_module_policies: boolean;
       }>(`
         select
           has_function_privilege(current_user, 'app.current_tenant_id()', 'EXECUTE') as current_tenant,
           has_function_privilege(current_user, 'app.enable_tenant_rls(text)', 'EXECUTE') as enable_rls,
           has_function_privilege(current_user, 'app.add_updated_at(text)', 'EXECUTE') as add_updated_at,
           has_function_privilege(current_user, 'app.block_mutation()', 'EXECUTE') as block_mutation,
-          has_function_privilege(current_user, 'app.has_active_module(text)', 'EXECUTE') as has_active_module
+          has_function_privilege(current_user, 'app.has_active_module(text)', 'EXECUTE') as has_active_module,
+          has_function_privilege(current_user, 'app.has_platform_access()', 'EXECUTE') as has_platform_access,
+          has_function_privilege(current_user, 'app.has_module_read(text)', 'EXECUTE') as has_module_read,
+          has_function_privilege(current_user, 'app.has_module_write(text)', 'EXECUTE') as has_module_write,
+          has_function_privilege(current_user, 'app.has_switch_access()', 'EXECUTE') as has_switch_access,
+          has_function_privilege(current_user, 'app.apply_module_policies()', 'EXECUTE') as apply_module_policies
       `);
       expect(routines.rows[0]).toEqual({
         current_tenant: true,
         enable_rls: false,
         add_updated_at: false,
         block_mutation: false,
-        has_active_module: false,
+        has_active_module: true,
+        has_platform_access: true,
+        has_module_read: true,
+        has_module_write: true,
+        has_switch_access: true,
+        apply_module_policies: false,
       });
 
       const catalog = await client.query<{ count: string }>(

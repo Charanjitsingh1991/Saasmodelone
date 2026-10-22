@@ -43,6 +43,7 @@ suite/
       0005_money.sql         proposals, contracts, invoices, payments, expenses
       0006_migration.sql     import batches, mapping, rows, issues, reconciliation
       0007_modules.sql       module catalog, dependencies, tenant entitlements
+      0008_platform_access.sql  access helpers, read retention, module RLS policies
     seed/
       0001_modules.sql       idempotent module catalog and dependency seed
 ```
@@ -50,7 +51,7 @@ suite/
 ## Non-negotiable rules
 
 1. **Tenant isolation is a database property.** Every tenant table carries `tenant_id`, has RLS enabled, and cross-tenant references are blocked by composite foreign keys.
-2. **Module access is an entitlement, checked on the server.** A licensed module is not a UI flag. Every module request resolves entitlement + role + scope; the database helper `app.has_active_module('<code>')` is the second line of defence.
+2. **Module access is an entitlement, checked on the server.** A licensed module is not a UI flag. Every module request resolves entitlement + role + scope; the database helpers `app.has_module_read('<code>')` and `app.has_module_write('<code>')` are the second line of defence. `app.has_active_module('<code>')` remains as a compatibility delegate to the write helper.
 3. **One shared directory.** Person and client identity live in the platform. Modules extend those records; none creates a parallel employee or client table.
 4. **Money is integer minor units.** `bigint` plus currency. No floating point in payroll or billing.
 5. **Payroll history is append-only.** Finalised runs are reversed, never edited. Audit events cannot be updated or deleted.
@@ -63,14 +64,14 @@ suite/
 Target: PostgreSQL 16+ (17 recommended), `pgcrypto` and `citext`, in the data region selected for the tenant at provisioning.
 
 ```bash
-# once a local Postgres exists
-for f in db/migrations/*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"; done
-for f in db/seed/*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"; done
+pnpm db:bootstrap   # roles and database, once
+pnpm db:migrate     # checksummed migrations; reapplies the runtime grants
+pnpm db:seed        # idempotent module catalog
 ```
 
 The module catalog is reference data, seeded once and updated by migration. A tenant is then granted entitlements; the catalog itself is not writable by the runtime role.
 
-The migrations have been parsed by PostgreSQL's own parser and applied in embedded PostgreSQL 18.6 (PGlite) with tenant-isolation, entitlement and jurisdiction tests. A live PostgreSQL 16+ instance, the `pgcrypto`/`citext` extensions and a restore drill are still required before real data — see `db/README.md` and `docs/roadmap.md`.
+The migrations and seed are applied by the repository harness against a real local PostgreSQL 17 instance, with fresh-apply, checksum, role-privilege, access-helper and RLS policy tests. PostgreSQL 16 in CI is planned for T10, and a restore drill is still required before real data — see `db/README.md` and `docs/roadmap.md`.
 
 The application connects as a role that does **not** own the tables. Tenant context is set per transaction:
 
