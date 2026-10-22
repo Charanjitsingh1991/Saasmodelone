@@ -23,6 +23,14 @@ grant select on table
   public.module_entitlement
 to saas_runtime;
 
+-- M0 RLS proof tables. Full DML is deliberate: the module denial tests must
+-- fail on the restrictive RLS policy, not on a missing table privilege.
+-- Every further table gains grants per command with the API path that uses it.
+grant select, insert, update, delete on table
+  public.employment,
+  public.project
+to saas_runtime;
+
 revoke all on all sequences in schema public from public;
 revoke all on all sequences in schema public from saas_runtime;
 

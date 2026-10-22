@@ -24,7 +24,8 @@ Every file is wrapped in a transaction. Do not edit an applied migration; add th
 The runtime grant allowlist is [packages/db/sql/runtime-grants.sql](../../packages/db/sql/runtime-grants.sql) and is reapplied after every migration. It grants:
 
 - `USAGE` on `public` and `app`, but no `CREATE`.
-- `SELECT` on the module catalog, dependencies and entitlements only. Later milestones add explicit grants per table and command as those read and write paths land.
+- `SELECT` on the module catalog, dependencies and entitlements.
+- Full `SELECT, INSERT, UPDATE, DELETE` on exactly two M0 proof tables: `employment` (People) and `project` (Work). Every other tenant table, including `person`, `client`, `legal_entity`, `tenant` and `app_user`, stays owner-only. Further tables gain grants per command as their API paths land.
 - `EXECUTE` on `app.current_tenant_id()`, the four access helpers (`has_platform_access`, `has_module_read`, `has_module_write`, `has_switch_access`) and the `has_active_module` compatibility alias (an exact delegate to `has_module_write`). Administrative procedures (`enable_tenant_rls`, `add_updated_at`, `apply_module_policies`) and trigger functions are revoked.
 
 There is no blanket `GRANT ON ALL TABLES` and no default privileges grant. The runtime cannot write the module catalog or its dependencies, cannot truncate, and cannot create objects.

@@ -37,7 +37,7 @@ Threats we design against first:
 - The runtime database role does not own tables and cannot bypass RLS.
 - Cross-tenant foreign keys are prevented with composite `(tenant_id, id)` references.
 - Tenant context is cleared when a pooled connection is returned.
-- Automated tests attempt cross-tenant reads and writes for every table and fail the build on success.
+- Automated table-level tests prove the restrictive module policies on the two M0 proof tables, `employment` (People) and `project` (Work): entitled access, denial for an unentitled module on an entitled tenant, denial for suspended, closed and deleted tenants holding an active entitlement, denial of cross-tenant reads and writes, and read-only access for a cancelled entitlement inside `read_until`. The matrix expands with each runtime table grant; it does not yet cover every tenant table.
 - Tenant provisioning and login-time membership lookup use a narrow privileged path, audited separately.
 - `FORCE ROW LEVEL SECURITY` is not enabled yet. The `tenant` table gains it only when the provisioning path sets `app.tenant_id` before inserting the tenant row and that path is tested; global reference tables and `infra.schema_migration` are never forced.
 
