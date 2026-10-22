@@ -14,7 +14,7 @@ The goal is not coverage theatre. It is confidence that payroll is correct, tena
 | Integration | Real Postgres, RLS, transactions, constraints, outbox | Every commit |
 | Entitlement | Module gating, expiry, cancellation, dependency degradation | Every commit |
 | Migration fixture | Source sample → staging → reconciliation → promotion → export | Every commit for fixtures; nightly for large fixtures |
-| End-to-end | Critical user journeys in a browser | Not built: no UI, no browser suite and no CI browser job |
+| End-to-end | Critical user journeys in a browser | One Playwright journey locally against the built shell, disposable PostgreSQL and an in-process API; declared in CI, never executed there |
 | Security regression | Cross-tenant access, role matrix, export authorization | Every commit |
 | Restore drill | Backup restores within RPO/RTO | Monthly and before a design partner goes live |
 
@@ -213,7 +213,7 @@ Covered by `tests/authentication.test.ts` against disposable PostgreSQL with the
 - No response contains a password hash, a raw session token or SQL text.
 - The auth-role privilege matrix is asserted in `tests/harness.test.ts`: identity column grants only, membership status reachable only through `app.auth_membership_status` (no direct `membership` grant and no `app.current_tenant_id()` execute), no access to business data, catalog, entitlements or audit, no DDL or `TRUNCATE`; the runtime role cannot read or write `auth_session` or `invitation`.
 
-Not covered yet: browser login and invitation screens (none exist), email delivery, password reset, MFA, OAuth, session rotation, device lists, distributed rate limiting and authentication-event audit.
+Not covered yet by this API suite: the browser journey covers sign-in and sign-out, but there is no invitation-acceptance, password-reset or session-management screen. Email delivery, password reset, MFA, OAuth, session rotation, device lists, distributed rate limiting and authentication-event audit remain unbuilt; §2.13 covers the browser shell itself.
 
 ### 2.12 People directory export (M0)
 
@@ -229,6 +229,27 @@ Not covered yet: browser login and invitation screens (none exist), email delive
 - Audit: exactly one `people.directory.exported` row per success, with actor, IP, user agent and metadata limited to `{ module, format, columns }`; no query string, header, cookie, token, tenant slug, role, email address or person data. Revoking runtime `INSERT` on `audit_event` produces a sanitized 500 with no CSV and no additional audit row.
 - Runtime privileges: `has_column_privilege` is true for exactly the eight granted person columns and false for `tenant_id`, personal contact, date of birth, gender, status, designation and the employment columns; table-level `SELECT` is false.
 - The route works with proof routes disabled, and invalid `exportBatchSize` values are rejected.
+
+### 2.13 Web shell and browser journey (M0)
+
+`apps/web/test` contains pure unit tests for the client logic:
+
+- Module ordering by catalog `sortOrder` then `code`, without mutating the input; navigation filtering by `canRead || canWrite`; People gating on `canRead`; read/write badge labels; role labels with a safe fallback; the module names listed in the People access state.
+- Login error mapping: the exact generic `401` message, a distinct `429` message, a retryable network state and a non-generic unknown state.
+- The History API router: `/login`, `/app`, `/app/people`, trailing slashes, unknown paths that must not become module screens, and document titles.
+
+`tests/e2e/people.spec.ts` is one Playwright/Chromium journey against `pnpm build:web` output served by Vite preview on `http://localhost:3000`, with an in-process API on `127.0.0.1:3001` and a disposable database created by `packages/testkit`. It uses real HTTP, real session cookies and real Argon2 hashes; fetch, the session and the database are not mocked. It covers:
+
+- An anonymous request to `/app/people` redirects to `/login`.
+- An invalid password returns exactly `Email, password or workspace is incorrect.`
+- A successful People owner sign-in reaches the empty People screen, shows `Read and write`, and the navigation contains People with `aria-current="page"` but not Work.
+- Local storage and session storage remain empty of credentials and session state; the URL contains no token.
+- The light and dark layouts have no horizontal overflow at 390, 768 and 1440 px.
+- The theme toggle survives a reload and is the only persisted key.
+- Sign-out returns to `/login` and removes the session cookie.
+- A keyboard-only sign-in reaches a Work-only workspace, shows Work but not People, and opening `/app/people` shows the access state rather than the directory shell.
+
+The journey is one test, not a full regression suite. It does not cover the distinct `429` sign-in message (covered only by the login-mapping unit tests), the post-sign-in `401` that clears in-memory state (no test; code inspection only), invitation acceptance, password reset, session expiry while a request is in flight, a People data-entry flow (none exists), export UI (none exists), other module screens (none exist), real proxy/edge deployment, CSP or assistive-technology testing.
 
 ---
 
@@ -256,13 +277,15 @@ The workflow at [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) is 
 - Denied-request audit: one `authorization.denied` row per authenticated access denial, no query/header/token leakage, and a denial still returned when the audit write fails.
 - People directory export: exact streaming CSV, formula-injection guarding, tenant isolation and override attempts, entitlement and role denials with no bytes, soft-delete exclusion, forbidden-field exclusion, pre-disclosure audit, audit-failure 500 and column-level runtime grants.
 - Migration runner: fresh apply, no-op re-apply and checksum tampering. The workflow also bootstraps, migrates twice and seeds twice before testing.
+- Web unit tests for module filtering and ordering, People gating, role labels, error mapping and routing.
+- Web build and one Playwright/Chromium browser journey against the built output, with a disposable database and an in-process API. The workflow installs Chromium with `pnpm exec playwright install --with-deps chromium`, then runs `pnpm test:e2e`; the journey's Playwright webServer runs `pnpm build:web` before serving, so it cannot pass on stale output.
 - Secret scan over tracked and untracked non-ignored regular files. It does not scan Git history, ignored files, packed objects or remote state, and it cannot prove absence.
 - Production dependency audit at high severity. It is not SAST or supply-chain provenance.
-- Workflow contract test: asserts the triggers, read-only permissions, action allowlist, PostgreSQL versions, localhost-only dummy credentials and exact command order. This proves the file's shape, not that GitHub executed it.
+- Workflow contract test: asserts the triggers, read-only permissions, action allowlist, PostgreSQL versions, localhost-only dummy credentials and exact command order, including the browser steps. This proves the file's shape, not that GitHub executed it.
 
 Not yet in CI: payroll golden cases (no payroll calculation), migration fixture → reconciliation → promotion → export (no Switch promotion), SAST, container scanning, SBOM, action SHA-pinning, branch protection and restore drills. The threat model is a draft and has not been reviewed by a named security owner.
 
-Browser end-to-end tests cover: sign-in, invite, employee onboarding, leave request/approval, payroll draft → finalise, import rehearsal → sign-off, invoice creation, module enablement on an existing tenant, and export. **None of these browser tests exist because there is no web UI**; authentication and the People export are proven at the API and database layers only. There is no Playwright configuration or CI browser job.
+Browser end-to-end coverage today is the single journey in §2.13: sign-in, the empty People screen, effective-module navigation, theme persistence, sign-out and the People access state. Invitation acceptance, employee onboarding, leave request/approval, payroll draft → finalise, import rehearsal → sign-off, invoice creation, module enablement and export have **no browser test and no screen**. There is a Playwright configuration and the CI workflow declares the browser job, but the workflow has never run; the local browser pass is not evidence of CI execution.
 
 ---
 
@@ -291,4 +314,4 @@ For each release that touches payroll, migration or authorization, attach:
 
 The M0 interim pack is [`release/m0-evidence.md`](release/m0-evidence.md): source commits, environment, exact commands and results, criterion-by-criterion status and an explicit "not proven — do not claim" section. It records that M0 has not exited.
 
-A green build is not evidence that a feature works. The evidence is the specific suite above, plus a manual smoke test of the primary journey. For M0 the primary UI journey cannot be smoke-tested because no UI exists.
+A green build is not evidence that a feature works. The evidence is the specific suite above, plus a manual smoke test of the primary journey. For M0 the primary UI journey is the sign-in and empty People path; it is covered by the Playwright journey, including automated overflow checks at 390, 768 and 1440 px. There is still no People data-entry journey to smoke-test.

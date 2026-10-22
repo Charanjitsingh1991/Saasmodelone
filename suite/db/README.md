@@ -132,7 +132,8 @@ A payroll run records the exact rule packs it used. Changing a rule means adding
 - Full-text search indexes (permission-aware search is a service concern).
 - Reporting views and materialized margin views.
 - Seeded jurisdiction content and reviewed rule-pack data. The tables exist; the statutory content does not yet.
-- Password reset, email delivery, MFA, OAuth/SSO, SCIM, tenant switching, session rotation, device lists and distributed rate limiting. Login by tenant slug, session validation, CSRF checks and one-time invitation acceptance exist; there is no web login UI.
+- Password reset, email delivery, MFA, OAuth/SSO, SCIM, tenant switching, session rotation, device lists and distributed rate limiting. Login by tenant slug, session validation, CSRF checks and one-time invitation acceptance exist; the web shell has sign-in and sign-out, but there is no invitation, password-reset or session-management UI.
+- People data entry, CRUD, import or export UI, and screens for modules other than the empty People state. The web shell reads `/v1/context` and performs no People query; it needs no schema or grant change.
 - Authentication-event audit. Provisioning, entitlement changes, authenticated access denials and People directory exports are audited; login, failed login, logout, invitation creation and invitation acceptance are not.
 - Scope authorization (legal entity, department, project, client), employee self-scope, role administration and seat enforcement. Role authorization for People and Work exists in the application layer only; grants and RLS do not know the membership role.
 - An audit read API or UI and an entitlement administration UI. Authenticated access denials and export events are written, but there is no read surface for them.

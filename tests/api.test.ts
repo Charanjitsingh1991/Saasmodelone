@@ -29,6 +29,7 @@ type Sessions = {
   cancelled: SessionFixture;
   employee: SessionFixture;
   workHr: SessionFixture;
+  dualModule: SessionFixture;
   suspendedTenant: SessionFixture;
   closedTenant: SessionFixture;
   deletedTenant: SessionFixture;
@@ -181,6 +182,7 @@ beforeAll(async () => {
       cancelled: await sessionFor(owner, fixtures.cancelled),
       employee: await sessionFor(owner, fixtures.employee),
       workHr: await sessionFor(owner, fixtures.workHr),
+      dualModule: await sessionFor(owner, fixtures.dualModule),
       suspendedTenant: await sessionFor(owner, fixtures.suspended),
       closedTenant: await sessionFor(owner, fixtures.closed),
       deletedTenant: await sessionFor(owner, fixtures.deleted),
@@ -247,6 +249,7 @@ describe('API request layer', () => {
           headers: cookie ? { cookie } : {},
         });
         expect(noContext.statusCode).toBe(401);
+        expect(noContext.headers['cache-control']).toBe('no-store');
         expect(noContext.json()).toEqual({ error: { code: 'UNAUTHENTICATED' } });
 
         const noProof = await app.inject({
@@ -350,8 +353,17 @@ describe('API request layer', () => {
         role: 'owner',
         permissions: ['people.read', 'people.write', 'work.read', 'work.write'],
         switchAccess: true,
-        modules: [{ code: 'people', canRead: true, canWrite: true }],
+        modules: [
+          {
+            code: 'people',
+            name: 'People',
+            sortOrder: 10,
+            canRead: true,
+            canWrite: true,
+          },
+        ],
       });
+      expect(context.headers['cache-control']).toBe('no-store');
 
       const employment = await app.inject({
         method: 'GET',
@@ -387,6 +399,41 @@ describe('API request layer', () => {
     });
   });
 
+  test('context returns catalog names and sort order for every effective module', async () => {
+    const dual = fx().dualModule;
+
+    await withApp(async (app) => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/v1/context',
+        headers: { cookie: session('dualModule').cookie },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(response.json()).toMatchObject({
+        userId: dual.userId,
+        tenantId: dual.tenantId,
+        role: 'owner',
+      });
+      expect(response.json().modules).toEqual([
+        {
+          code: 'people',
+          name: 'People',
+          sortOrder: 10,
+          canRead: true,
+          canWrite: true,
+        },
+        {
+          code: 'work',
+          name: 'Work',
+          sortOrder: 30,
+          canRead: true,
+          canWrite: true,
+        },
+      ]);
+    });
+  });
+
   test('tenant B sees Work only and only its own project', async () => {
     const b = fx().b;
 
@@ -403,7 +450,15 @@ describe('API request layer', () => {
         role: 'admin',
         permissions: ['people.read', 'people.write', 'work.read', 'work.write'],
         switchAccess: true,
-        modules: [{ code: 'work', canRead: true, canWrite: true }],
+        modules: [
+          {
+            code: 'work',
+            name: 'Work',
+            sortOrder: 30,
+            canRead: true,
+            canWrite: true,
+          },
+        ],
       });
 
       const projects = await app.inject({
@@ -457,8 +512,17 @@ describe('API request layer', () => {
         role: 'hr',
         permissions: ['people.read', 'people.write'],
         switchAccess: false,
-        modules: [{ code: 'people', canRead: true, canWrite: false }],
+        modules: [
+          {
+            code: 'people',
+            name: 'People',
+            sortOrder: 10,
+            canRead: true,
+            canWrite: false,
+          },
+        ],
       });
+      expect(context.headers['cache-control']).toBe('no-store');
 
       const employment = await app.inject({
         method: 'GET',

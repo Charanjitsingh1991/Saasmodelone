@@ -13,8 +13,8 @@ SaaSModels One is one **organisation workspace** with a platform core and a cata
 browser / mobile
       │ HTTPS
       ▼
-web + API (TypeScript, Fastify)
-      │  tenant context, authz, module entitlement, validation
+web (React 19 + Vite) + API (TypeScript, Fastify)
+      │  same origin; tenant context, authz, module entitlement, validation
       ├── People (HRM)
       ├── CRM
       ├── Work (projects and delivery)
@@ -190,7 +190,9 @@ Current authentication shape:
 - Login is rate-limited in memory per process by source address and additionally per email; invitation acceptance is rate-limited per source address. The limiter keys on the observed socket address, so behind a proxy without `trustProxy` every client shares the proxy address. It is not a distributed limiter and not a substitute for edge/WAF controls.
 - Auth responses (`/v1/auth/*`), including errors and logout, are sent with `Cache-Control: no-store`.
 
-Not built: password reset, email delivery, MFA, OAuth/SSO, SCIM, tenant switching, session rotation, device lists, a distributed rate limiter, authentication-event audit, a login UI, scope authorization, role administration and seat enforcement. A valid session proves identity only; each member request resolves the role server-side and a gated module requires both its entitlement and the role permission.
+Not built: password reset, email delivery, MFA, OAuth/SSO, SCIM, tenant switching, session rotation, device lists, a distributed rate limiter, authentication-event audit, scope authorization, role administration and seat enforcement. A valid session proves identity only; each member request resolves the role server-side and a gated module requires both its entitlement and the role permission.
+
+The M0 web client is a React 19 + Vite single-page application with three History API routes: `/login`, `/app` and `/app/people`. Vite serves it on port 3000 with `strictPort` and proxies `/v1` and `/health` to the API on `127.0.0.1:3001` (overridable with `VITE_API_PROXY_TARGET`); production is expected to serve the static bundle and API from one origin behind an edge or reverse proxy that preserves `Origin` and falls back to `index.html` for application paths. The app loads the session and then `/v1/context`. It stores no session token in browser storage: the cookie is `HttpOnly`, and the CSRF token needed for logout is held in module memory. Sign-in uses the generic failure response, a distinct rate-limit message and a retryable network state; the theme is the only persistent preference. Navigation is built only from effective modules, and the People screen is an empty state with a read/write badge and no data entry, import, export or fake rows. A member without readable People who opens `/app/people` gets an access state listing their modules. Client routing and hiding are presentation only, never authorization. One Playwright journey proves the shell against the built output, a disposable database and an in-process API; see `testing.md` §2.13 and [`adr/0006-web-shell.md`](adr/0006-web-shell.md).
 
 `app.has_module_read('<code>')` and `app.has_module_write('<code>')` are the tenant-scoped, security-definer helpers for database checks, and module tables carry restrictive RLS policies built on them (installed idempotently by `app.apply_module_policies()`). `app.has_active_module('<code>')` remains only as an exact alias of the write helper. Application services must still enforce entitlement explicitly; the helpers are a second line of defence, not a replacement for the policy layer.
 
@@ -319,7 +321,7 @@ Initial topology (single region, selected at organisation provisioning):
 | Database | Managed PostgreSQL 16+ in the tenant's selected region | PITR, encrypted, private network |
 | Objects | S3-compatible storage in the tenant's selected region | Versioning, lifecycle, no public access |
 | Cache/queue | Managed Redis (optional at first) | Outbox can run without it |
-| Edge | CDN + WAF + TLS | Static assets, rate limiting |
+| Edge | CDN + WAF + TLS | Static assets, rate limiting, `/v1` proxy, SPA fallback for application paths |
 | Secrets | Managed secret store / KMS | No secrets in environment files committed to Git |
 | Observability | Structured logs, metrics, traces, error tracking | PII redaction before export |
 
@@ -343,5 +345,6 @@ Scaling path, only when measured: read replicas for reporting, a separate worker
 - A full general ledger, procurement or inventory. Money is an ERP foundation for service businesses, not a replacement for a manufacturing ERP.
 - Real-time collaborative editing.
 - AI-generated payroll decisions.
+- Server-side rendering, route-level code splitting, a shared component design system and a production Content-Security-Policy. The M0 client is a small static bundle with a system font stack; production headers must be authored and verified with the deployment, not claimed from the repository.
 
 Deferring these is a design decision, not an oversight.

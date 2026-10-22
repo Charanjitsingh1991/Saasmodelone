@@ -2,7 +2,7 @@
 
 Status: **draft for review** · 22 October 2026
 
-This threat model covers the M0 foundation only: synthetic tenants, local PostgreSQL, a minimal API/worker request layer and no web UI. It has not been reviewed or approved by a named human security owner, and no independent penetration test has been performed. M0 is not production-ready. Do not load real customer, payroll, bank, statutory-identifier or design-partner data into this build. The design-partner gate in [`../security.md`](../security.md) remains unticked.
+This threat model covers the M0 foundation only: synthetic tenants, local PostgreSQL, a minimal API/worker request layer, and a React 19 + Vite shell with sign-in, sign-out and an empty People screen. The shell has no People data entry, CRUD, import or export UI, no invitation UI and no screen for any other module. It has not been reviewed or approved by a named human security owner, and no independent penetration test has been performed. M0 is not production-ready. Do not load real customer, payroll, bank, statutory-identifier or design-partner data into this build. The design-partner gate in [`../security.md`](../security.md) remains unticked.
 
 The baseline controls and target controls are in [`../security.md`](../security.md); schema and privilege conventions are in [`../../db/README.md`](../../db/README.md); tenancy and migration decisions are recorded in [`../adr/0002-postgres-rls-tenancy.md`](../adr/0002-postgres-rls-tenancy.md), [`../adr/0003-migration-staging-and-promotion.md`](../adr/0003-migration-staging-and-promotion.md) and [`../adr/0005-modules-and-entitlements.md`](../adr/0005-modules-and-entitlements.md).
 
@@ -13,8 +13,9 @@ The baseline controls and target controls are in [`../security.md`](../security.
 - The People directory CSV: seven identity fields per non-deleted person in the session tenant.
 - The audit trail: provisioning, entitlement changes, authenticated access denials and People exports.
 - Database and CI credentials: `saas_owner`, `saas_runtime`, `saas_auth`, database URLs and CI-only dummy credentials.
-- Availability of the API, database and export path.
-- Repository integrity: migrations, grants, workflow and lockfile.
+- Browser session state: the HttpOnly `saas_session` cookie, the in-memory CSRF token used for sign-out, and the rendered module/role metadata.
+- Availability of the API, database, export path and web shell.
+- Repository integrity: migrations, grants, workflow, lockfile and pinned frontend dependencies.
 
 ## 2. Actors
 
@@ -27,14 +28,14 @@ The baseline controls and target controls are in [`../security.md`](../security.
 
 ## 3. Trust boundaries and data flows
 
-1. **Browser → API.** The browser presents an opaque `saas_session` cookie. State-changing requests require an exact `Origin`; logout also requires the CSRF token. There is no web login UI in M0.
+1. **Browser → API.** The M0 React/Vite shell presents an opaque `saas_session` cookie from sign-in. State-changing requests require an exact `Origin`; logout also requires the CSRF token returned in the session response and held only in module memory. The browser never receives the session token, and credentials are not placed in the URL or browser storage.
 2. **API → PostgreSQL as `saas_runtime`.** Each protected request opens a member transaction, sets `app.tenant_id` and `app.user_id` transaction-locally, resolves the membership role, checks platform access, entitlement and role permission, then runs explicit SQL under RLS. The runtime role is not the table owner, has no `BYPASSRLS`, no DDL and only the reviewed grants.
 3. **API → PostgreSQL as `saas_auth`.** Login, session lookup, membership status and invitation acceptance use narrow identity grants and security-definer functions before a tenant transaction exists. `auth_session` and `invitation` carry `tenant_id` but deliberately have no RLS; the runtime role cannot reach them.
 4. **Operator CLI → PostgreSQL as `saas_owner`.** Provisioning, entitlement changes and invitation creation are owner-only paths, never API routes. They write audit rows in the same transaction.
 5. **API → People CSV.** `GET /v1/people/export` uses two member transactions: a durable export audit row before the first byte, then a gateway-rechecked server-side cursor and streamed CSV. The response is not stored.
 6. **Worker.** `runTenantJob` uses the system-only `withTenantTransaction`, which does not check membership. There is no queue, polling loop or outbox consumer yet.
 7. **CI.** GitHub Actions checks out the repository read-only, starts an ephemeral PostgreSQL service, installs with a frozen lockfile, scans tracked and untracked non-ignored regular files, audits production dependencies and runs the suites against localhost-only dummy credentials. There is no Git remote and the workflow has not executed on GitHub.
-8. **Web UI.** Absent. `apps/web` has no server, route or People screen; there is no browser test.
+8. **Web shell.** A React 19 + Vite SPA served on the application origin. In development and preview, Vite proxies `/v1` and `/health` to `127.0.0.1:3001`; production is expected to use one origin behind an edge or reverse proxy, which does not exist yet. The shell has `/login`, `/app` and `/app/people`, holds no session token in browser storage and renders module metadata from `/v1/context`. It has no People data-entry, CRUD, import, export or invitation UI and no other module screen. Client routing is not an authorization boundary. One Playwright journey runs locally against the built output and a disposable database; it is declared in CI but CI has never run.
 
 ## 4. Threat table
 
@@ -64,12 +65,20 @@ Risk ratings are qualitative for M0, not a formal risk register.
 | T20 | Error, log or response leakage | Medium | Sanitized 500 responses; no SQL, stack, token or password in API responses; auth responses `no-store`; no exception detail returned | `tests/api.test.ts`: unknown errors are a sanitized 500. `tests/authentication.test.ts`: no password hash, raw token or SQL text in responses. | Production logging and redaction are not implemented; Fastify error logs could contain request context once logging is enabled. |
 | T21 | Worker system transaction used from a member request | High | `withTenantTransaction` is system-only and does not check membership; worker entry point is separate from API routes; API imports the member helper | `tests/worker.test.ts`: tenant-scoped job, unentitled/suspended denial, rollback. Import boundaries keep apps separate. | A future route could import the system helper; enforcement is code review and import discipline, not a database guard. No worker loop or queue yet. |
 | T22 | Data loss, over-retention or inability to investigate | Critical | None for M0 beyond synthetic test databases | No backup/restore, retention/legal-hold, offboarding or audit-read test exists. | Not mitigated. No backup and restore drill, retention jobs, legal holds, customer export/offboarding or audit read surface. Accepted only because M0 holds synthetic data. |
+| T23 | XSS through module metadata or future directory data rendered in the shell | High | React escapes text by default; the shell uses no `dangerouslySetInnerHTML`, `innerHTML`, third-party runtime script, CDN, external font or user-supplied HTML. Today it renders only server-generated module names, role labels, fixed copy and error strings; no People data is displayed. | `apps/web/test/model.test.ts` and `tests/e2e/people.spec.ts` render the shell; code review confirms no raw-HTML sink. There is no dedicated XSS suite because there is no user-supplied content yet. | No Content-Security-Policy and no sanitisation boundary beyond React escaping. A future People data screen must keep text rendering, add adversarial fixtures and define a CSP before design-partner data. |
+| T24 | Session token or CSRF token stolen from browser storage or a URL | High | `saas_session` is HttpOnly and never reaches JavaScript; the CSRF token lives only in module memory; credentials and tokens are never written to local storage, session storage or the URL. Sign-out clears the cookie and in-memory state. | `tests/e2e/people.spec.ts` asserts empty local/session storage, no email or password in stored values, no token in the URL, and cookie removal after sign-out. API cookie tests cover `HttpOnly`, `SameSite=Strict` and expiry. | A same-origin XSS could still act in the session, and the in-memory CSRF token is readable by same-origin script by design. No rotation, theft detection or CSP. |
+| T25 | Open redirect or a crafted link that sends a user elsewhere after sign-in | Medium | The router accepts only three exact literal paths (with optional trailing slash); there is no redirect query parameter or external-URL route. Sign-in always lands on `/app/people` when People is readable, otherwise `/app`, and a signed-in reload keeps `/app` or `/app/people`. | `apps/web/test/router.test.ts` rejects arbitrary paths; the browser journey starts from `/app/people` anonymously and lands on `/login`, then on the empty People route. | An external edge or future route could add redirect behaviour; no server-side redirect logic exists to review yet. |
+| T26 | CSRF against sign-out or another state-changing request | High | Exact `Origin` match is required for every `POST`; sign-out also sends the session CSRF token and revokes only the presented session; the cookie is `SameSite=Strict`. | `tests/authentication.test.ts` covers Origin and CSRF rejection; the browser journey signs out with the in-memory token and checks the cookie is gone. | Only sign-out is state-changing from the shell today. Origin handling behind a real production proxy is unproven because no deployment exists. |
+| T27 | Module metadata disclosure through context or navigation | Medium | `/v1/context` requires a session, filters to `is_licensable` modules effective under entitlement and role, returns no data rows, and is `Cache-Control: no-store`. The shell renders only those modules. A member without People sees an access state that lists only their own modules. | `tests/api.test.ts` covers context names, order, effective filtering and `no-store`; the browser journey proves a Work-only member sees Work and not People. | The names and sort order of effective modules are intentionally visible, and the static bundle is public. No secret is placed in the client. |
+| T28 | Client routing treated as an authorization boundary | High | Every data route repeats membership, platform, entitlement and role checks server-side. The navigation only offers effective modules; non-People entries are non-clickable; `/app/people` renders an access state when People is not readable and performs no People fetch. | `tests/e2e/people.spec.ts` opens `/app/people` as a Work-only user and gets the access state, not the directory; `tests/api.test.ts` and `tests/people-export.test.ts` prove the server denies the corresponding API calls. | Future screens must keep calling gated routes and must not fetch data directly in the client. Review discipline, not a client-side enforcement mechanism. |
+| T29 | Compromised frontend or browser-test dependency | High | React, React DOM, Vite, the React plugin, type packages and Playwright are exact-pinned; `pnpm-lock.yaml` is frozen in CI; the production bundle has no runtime third-party script, CDN, external font or analytics; production dependency audit runs locally and in CI. | `tests/ci-workflow.test.ts` asserts the workflow and action allowlist; `pnpm audit --prod --audit-level high` reports no known production vulnerabilities. | No SBOM, provenance verification, SRI, lockfile review automation or action SHA-pinning. Playwright is a development dependency and is not audited by the production-only audit. CI has never run. |
+| T30 | Same-origin proxy or production header misconfiguration | High | Development and preview proxy `/v1` and `/health` to localhost, preserve `Origin`, and the API rejects mismatches; the app uses relative URLs only. | The local browser journey exercises the Vite preview proxy end to end. | No production edge, TLS, HSTS, CSP, frame-ancestors, referrer policy or proxy-header test exists. Production is not deployed and no header claim is made. |
 
 ## 5. Disposition
 
 ### Mitigated and tested
 
-T1, T2, T3, T4, T5, T6, T9, T11, T12, T14, T15, T16, T18, T19 and T21 have a control and a named automated test in the table above. Tests use a real disposable PostgreSQL database, the real runtime/auth roles and real cookies; they do not mock RLS.
+T1, T2, T3, T4, T5, T6, T9, T11, T12, T14, T15, T16, T18, T19, T21, T24, T25, T26, T27 and T28 have a control and a named automated test in the table above. Tests use a real disposable PostgreSQL database, the real runtime/auth roles, real cookies and a real browser for the shell; they do not mock RLS, fetch, the session or the database.
 
 ### Mitigated but not tested
 
@@ -78,6 +87,9 @@ T1, T2, T3, T4, T5, T6, T9, T11, T12, T14, T15, T16, T18, T19 and T21 have a con
 - T13 relies on streaming design and backpressure tests, but abuse resistance is not tested.
 - T17 relies on the frozen lockfile, the local production audit and the workflow contract; the workflow has not run, and actions are not SHA-pinned.
 - T20 has response tests, but production logging and redaction are not built.
+- T23 relies on React escaping and the absence of any raw-HTML sink or user-supplied content; there is no CSP and no dedicated XSS suite yet.
+- T29 relies on exact pins, the frozen lockfile, the production-only audit and the workflow contract; there is no SBOM or provenance verification, and the workflow has never run.
+- T30 is mitigated only for the local preview proxy. No production edge or header set exists, so HSTS, CSP, frame-ancestors and proxy behaviour are unverified and must not be claimed.
 
 ### Not mitigated or accepted only for the M0 foundation
 
@@ -95,5 +107,7 @@ T1, T2, T3, T4, T5, T6, T9, T11, T12, T14, T15, T16, T18, T19 and T21 have a con
 3. What concurrency and size limits are required before an export route is exposed beyond synthetic data?
 4. Which audit events and read surfaces are mandatory before a design partner imports real records?
 5. Which open-source or hosted dependency and Action provenance controls are required before a Git remote is added?
+6. What Content-Security-Policy, XSS regression suite and same-origin proxy verification are required before the People screen renders employee data?
+7. Who owns the production edge, TLS and header configuration, and how will `Origin` preservation and SPA fallback be proven there?
 
 Until those questions have named owners and the design-partner gate is satisfied, this document is a draft, not an approval to handle real data.

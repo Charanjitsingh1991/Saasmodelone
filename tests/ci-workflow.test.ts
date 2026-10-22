@@ -78,6 +78,8 @@ describe('CI workflow contract', () => {
       'pnpm db:seed',
       'pnpm db:seed',
       'pnpm test',
+      'pnpm exec playwright install --with-deps chromium',
+      'pnpm test:e2e',
     ]);
   });
 });

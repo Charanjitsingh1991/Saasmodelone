@@ -4,6 +4,9 @@ import {
   hasPermission,
   permissionFor,
   permissionsForRole,
+  type ContextModule,
+  type ContextResponse,
+  type SessionResponse,
 } from '@saasmodels/contracts';
 import Fastify, {
   type FastifyInstance,
@@ -70,12 +73,6 @@ export type CreateServerOptions = {
   exportBatchSize?: number;
   enableProofRoutes?: boolean;
   logger?: boolean;
-};
-
-type ContextModule = {
-  code: string;
-  canRead: boolean;
-  canWrite: boolean;
 };
 
 type PersonExportRow = {
@@ -193,7 +190,7 @@ async function accessError(
   throw error;
 }
 
-function sessionBody(session: SessionInfo | SessionRecord) {
+function sessionBody(session: SessionInfo | SessionRecord): SessionResponse {
   return {
     userId: session.userId,
     tenantId: session.tenantId,
@@ -376,10 +373,14 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
     }
   });
 
-  // Auth responses carry credentials or session state and must never be cached
-  // by a browser, proxy or shared cache, including error responses.
+  // Auth and context responses carry credentials, session or authorization
+  // state and must never be cached by a browser, proxy or shared cache,
+  // including error responses.
   app.addHook('onSend', async (request, reply) => {
-    if (request.url.startsWith('/v1/auth/')) {
+    if (
+      request.url.startsWith('/v1/auth/') ||
+      request.url.startsWith('/v1/context')
+    ) {
       reply.header('cache-control', 'no-store');
     }
   });
@@ -487,11 +488,13 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
           );
           const modules = await client.query<ContextModule>(
             `select m.code,
+                    m.name,
+                    m.sort_order as "sortOrder",
                     app.has_module_read(m.code) as "canRead",
                     app.has_module_write(m.code) as "canWrite"
                from platform_module m
               where m.is_licensable
-              order by m.code`,
+              order by m.sort_order, m.code`,
           );
 
           // The database answers entitlement; the role policy answers authorization.
@@ -506,7 +509,7 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
             return canRead || canWrite ? [{ ...row, canRead, canWrite }] : [];
           });
 
-          return {
+          const body: ContextResponse = {
             userId: session.userId,
             tenantId: session.tenantId,
             role: member.role,
@@ -514,6 +517,7 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
             switchAccess: switchAccess.rows[0]?.allowed ?? false,
             modules: effective,
           };
+          return body;
         },
       );
     } catch (error) {

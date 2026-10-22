@@ -52,6 +52,7 @@ export type AccessFixtures = {
   cancelled: EmploymentFixture;
   employee: EmploymentFixture;
   workHr: TenancyFixture;
+  dualModule: TenancyFixture;
   exportPeople: PersonRowFixture[];
   softDeletedPerson: PersonRowFixture;
   nonMemberUserId: string;
@@ -525,6 +526,19 @@ export async function createAccessFixtures(
   );
   await grantModule(client, workHr.tenantId, 'work', { source: 'internal' });
 
+  // Two effective modules let the context test prove catalog ordering and
+  // names without disturbing the single-module isolation fixtures.
+  const dualModule = await createTenancyFixture(
+    client,
+    jurisdictionId,
+    'm',
+    '2024-07-01',
+    '2024-08-01',
+    { internal: true },
+  );
+  await grantModule(client, dualModule.tenantId, 'people');
+  await grantModule(client, dualModule.tenantId, 'work', { source: 'internal' });
+
   const nonMemberUserId = await insertAppUser(
     client,
     `nonmember_${suffix()}@example.test`,
@@ -547,6 +561,7 @@ export async function createAccessFixtures(
     cancelled,
     employee,
     workHr,
+    dualModule,
     exportPeople,
     softDeletedPerson,
     nonMemberUserId,
