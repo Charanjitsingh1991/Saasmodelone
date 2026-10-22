@@ -120,7 +120,20 @@ Test the ugly cases: blank rows, duplicate tax-ID/email, Unicode names, Excel da
 - Audit write failure rolls back the underlying privileged action.
 - Domain events are delivered at least once and consumers are idempotent.
 
-### 2.7 Export and portability
+### 2.7 Request layer
+
+The API and worker share one tenant transaction helper, and the same suites prove both surfaces:
+
+- The principal is injected by the caller; missing, malformed or unknown principals fail before data is read. No header, query string, body or cookie can supply a tenant.
+- Tenant context is transaction-local. The platform check and the module gate run on the same client and in the same transaction as the caller's query.
+- Every module route and job declares a read or write gate; an unentitled operation returns a stable denial code and no rows.
+- Attempts to override the tenant with `x-tenant-id` or a `tenant_id` parameter return only the principal's records.
+- Reusing one pool for sequential tenants does not leak `app.tenant_id`.
+- A denied gate or a failed callback rolls back; a callback error persists nothing.
+
+These suites use the real database and the runtime role, not mocks. They sit above the table-level denial suite; authentication, roles and scopes are not implemented yet.
+
+### 2.8 Export and portability
 
 - A full export includes every entitled module, document metadata and file objects.
 - A per-module export includes exactly that module plus the shared directory records it needs, and nothing from an unentitled module.
@@ -129,7 +142,7 @@ Test the ugly cases: blank rows, duplicate tax-ID/email, Unicode names, Excel da
 - An export cannot include data from another tenant.
 - Expired signed URLs fail.
 
-### 2.8 Standalone module acceptance
+### 2.9 Standalone module acceptance
 
 Every licensable module must pass the same test before it is sold alone:
 

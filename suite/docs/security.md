@@ -38,6 +38,7 @@ Threats we design against first:
 - Cross-tenant foreign keys are prevented with composite `(tenant_id, id)` references.
 - Tenant context is cleared when a pooled connection is returned.
 - Automated table-level tests prove the restrictive module policies on the two M0 proof tables, `employment` (People) and `project` (Work): entitled access, denial for an unentitled module on an entitled tenant, denial for suspended, closed and deleted tenants holding an active entitlement, denial of cross-tenant reads and writes, and read-only access for a cancelled entitlement inside `read_until`. The matrix expands with each runtime table grant; it does not yet cover every tenant table.
+- The API and worker share one tenant transaction: the injected principal is the only source of tenant identity, and no header, query string, body or cookie is trusted for it. The platform check, module gate and data query use the same client and transaction, with `app.tenant_id` set transaction-locally. Authentication is not implemented yet, and role and scope checks are not built; the current principal is trusted for tenant identity only.
 - Tenant provisioning and login-time membership lookup use a narrow privileged path, audited separately.
 - `FORCE ROW LEVEL SECURITY` is not enabled yet. The `tenant` table gains it only when the provisioning path sets `app.tenant_id` before inserting the tenant row and that path is tested; global reference tables and `infra.schema_migration` are never forced.
 

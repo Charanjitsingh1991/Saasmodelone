@@ -11,6 +11,10 @@
   },
   "dependencies": {
     "@saasmodels/contracts": "workspace:*",
-    "@saasmodels/db": "workspace:*"
+    "@saasmodels/db": "workspace:*",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1"
   }
 }

@@ -1,0 +1,329 @@
+import { randomBytes, randomUUID } from 'node:crypto';
+import type { Client } from 'pg';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export type EmploymentFixture = {
+  tenantId: string;
+  userId: string;
+  personId: string;
+  legalEntityId: string;
+  employmentId: string;
+  employmentStartDate: string;
+};
+
+export type ProjectFixture = {
+  id: string;
+  name: string;
+  startDate: string;
+};
+
+export type TenancyFixture = EmploymentFixture & {
+  project: ProjectFixture;
+};
+
+export type AccessFixtures = {
+  a: TenancyFixture;
+  b: TenancyFixture;
+  suspended: EmploymentFixture;
+  closed: EmploymentFixture;
+  deleted: EmploymentFixture;
+  cancelled: EmploymentFixture;
+};
+
+type TenantOptions = {
+  status?: string;
+  deleted?: boolean;
+  internal?: boolean;
+};
+
+type ModuleOptions = {
+  status?: string;
+  source?: string;
+  readUntil?: Date;
+};
+
+function suffix(): string {
+  return randomBytes(4).toString('hex');
+}
+
+async function insertJurisdiction(client: Client): Promise<string> {
+  const result = await client.query<{ id: string }>(
+    `insert into jurisdiction
+       (code, country_code, name, default_currency, default_timezone)
+     values ('ZZ', 'ZZ', 'Synthetic request-layer jurisdiction', 'ZZZ', 'UTC')
+     returning id`,
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error('Could not create the test jurisdiction');
+  }
+  return row.id;
+}
+
+async function insertTenant(
+  client: Client,
+  label: string,
+  options: TenantOptions = {},
+): Promise<string> {
+  const result = await client.query<{ id: string }>(
+    `insert into tenant (name, slug, data_region, status, deleted_at, is_internal)
+     values ($1, $2, 'test', $3, $4, $5)
+     returning id`,
+    [
+      `Request layer ${label}`,
+      `req_${label}_${suffix()}`,
+      options.status ?? 'active',
+      options.deleted ? new Date() : null,
+      options.internal ?? false,
+    ],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error(`Could not create tenant ${label}`);
+  }
+  return row.id;
+}
+
+async function insertLegalEntity(
+  client: Client,
+  tenantId: string,
+  label: string,
+  jurisdictionId: string,
+): Promise<string> {
+  const result = await client.query<{ id: string }>(
+    `insert into legal_entity (tenant_id, name, code, jurisdiction_id, currency, timezone)
+     values ($1, $2, $3, $4, 'ZZZ', 'UTC')
+     returning id`,
+    [tenantId, `Legal ${label}`, `le_${label}_${suffix()}`, jurisdictionId],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error(`Could not create the legal entity for ${label}`);
+  }
+  return row.id;
+}
+
+async function insertPerson(
+  client: Client,
+  tenantId: string,
+  label: string,
+): Promise<string> {
+  const result = await client.query<{ id: string }>(
+    `insert into person (tenant_id, first_name, display_name, work_email)
+     values ($1, 'Ada', $2, $3)
+     returning id`,
+    [tenantId, `Person ${label}`, `${label}_${suffix()}@example.test`],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error(`Could not create the person for ${label}`);
+  }
+  return row.id;
+}
+
+async function insertEmployment(
+  client: Client,
+  tenantId: string,
+  personId: string,
+  legalEntityId: string,
+  startDate: string,
+): Promise<string> {
+  const result = await client.query<{ id: string }>(
+    `insert into employment
+       (tenant_id, person_id, legal_entity_id, employment_type, start_date)
+     values ($1, $2, $3, 'full_time', $4)
+     returning id`,
+    [tenantId, personId, legalEntityId, startDate],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error('Could not create the employment row');
+  }
+  return row.id;
+}
+
+async function insertClientRecord(
+  client: Client,
+  tenantId: string,
+  label: string,
+): Promise<string> {
+  const result = await client.query<{ id: string }>(
+    `insert into client (tenant_id, name, code, currency)
+     values ($1, $2, $3, 'ZZZ')
+     returning id`,
+    [tenantId, `Client ${label}`, `cl_${label}_${suffix()}`],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error(`Could not create the client for ${label}`);
+  }
+  return row.id;
+}
+
+async function insertProject(
+  client: Client,
+  tenantId: string,
+  clientId: string,
+  name: string,
+  startDate: string,
+  label: string,
+): Promise<string> {
+  const result = await client.query<{ id: string }>(
+    `insert into project (tenant_id, client_id, name, code, currency, start_date)
+     values ($1, $2, $3, $4, 'ZZZ', $5)
+     returning id`,
+    [tenantId, clientId, name, `pr_${label}_${suffix()}`, startDate],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error(`Could not create the project for ${label}`);
+  }
+  return row.id;
+}
+
+async function grantModule(
+  client: Client,
+  tenantId: string,
+  code: string,
+  options: ModuleOptions = {},
+): Promise<void> {
+  await client.query(
+    `insert into module_entitlement
+       (tenant_id, module_id, status, source, starts_at, ends_at, read_until)
+     values ($1, (select id from platform_module where code = $2), $3, $4,
+             now() - interval '1 day', null, $5)`,
+    [
+      tenantId,
+      code,
+      options.status ?? 'active',
+      options.source ?? 'contract',
+      options.readUntil ?? null,
+    ],
+  );
+}
+
+async function createEmploymentFixture(
+  client: Client,
+  jurisdictionId: string,
+  label: string,
+  startDate: string,
+  options: TenantOptions = {},
+): Promise<EmploymentFixture> {
+  const tenantId = await insertTenant(client, label, options);
+  const legalEntityId = await insertLegalEntity(client, tenantId, label, jurisdictionId);
+  const personId = await insertPerson(client, tenantId, label);
+  const employmentId = await insertEmployment(
+    client,
+    tenantId,
+    personId,
+    legalEntityId,
+    startDate,
+  );
+  return {
+    tenantId,
+    userId: randomUUID(),
+    personId,
+    legalEntityId,
+    employmentId,
+    employmentStartDate: startDate,
+  };
+}
+
+async function createTenancyFixture(
+  client: Client,
+  jurisdictionId: string,
+  label: string,
+  startDate: string,
+  projectStartDate: string,
+  options: TenantOptions = {},
+): Promise<TenancyFixture> {
+  const base = await createEmploymentFixture(
+    client,
+    jurisdictionId,
+    label,
+    startDate,
+    options,
+  );
+  const clientId = await insertClientRecord(client, base.tenantId, label);
+  const projectName = `${label.toUpperCase()} original project`;
+  const projectId = await insertProject(
+    client,
+    base.tenantId,
+    clientId,
+    projectName,
+    projectStartDate,
+    label,
+  );
+  return {
+    ...base,
+    project: { id: projectId, name: projectName, startDate: projectStartDate },
+  };
+}
+
+export async function createAccessFixtures(
+  client: Client,
+): Promise<AccessFixtures> {
+  const jurisdictionId = await insertJurisdiction(client);
+
+  const a = await createTenancyFixture(
+    client,
+    jurisdictionId,
+    'a',
+    '2024-01-01',
+    '2024-02-01',
+  );
+  // Work is catalog status 'planned', so only an internal tenant may hold it,
+  // and its entitlement must carry an internal source.
+  const b = await createTenancyFixture(
+    client,
+    jurisdictionId,
+    'b',
+    '2023-05-01',
+    '2024-03-01',
+    { internal: true },
+  );
+
+  await grantModule(client, a.tenantId, 'people');
+  await grantModule(client, b.tenantId, 'work', { source: 'internal' });
+
+  const suspended = await createEmploymentFixture(
+    client,
+    jurisdictionId,
+    's',
+    '2022-01-01',
+    { status: 'suspended' },
+  );
+  await grantModule(client, suspended.tenantId, 'people');
+
+  const closed = await createEmploymentFixture(
+    client,
+    jurisdictionId,
+    'l',
+    '2022-02-01',
+    { status: 'closed' },
+  );
+  await grantModule(client, closed.tenantId, 'people');
+
+  const deleted = await createEmploymentFixture(
+    client,
+    jurisdictionId,
+    'd',
+    '2022-03-01',
+    { deleted: true },
+  );
+  await grantModule(client, deleted.tenantId, 'people');
+
+  const cancelled = await createEmploymentFixture(
+    client,
+    jurisdictionId,
+    'c',
+    '2022-04-01',
+  );
+  await grantModule(client, cancelled.tenantId, 'people', {
+    status: 'cancelled',
+    readUntil: new Date(Date.now() + 30 * DAY_MS),
+  });
+
+  return { a, b, suspended, closed, deleted, cancelled };
+}

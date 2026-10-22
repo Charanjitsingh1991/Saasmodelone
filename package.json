@@ -20,8 +20,10 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@saasmodels/api": "workspace:*",
     "@saasmodels/db": "workspace:*",
     "@saasmodels/testkit": "workspace:*",
+    "@saasmodels/worker": "workspace:*",
     "@types/node": "22.18.0",
     "@types/pg": "8.23.1",
     "dotenv": "18.0.8",

@@ -3,7 +3,7 @@
 This directory is the engineering project for **SaaSModels One**, the commercial product. It is deliberately separate from the marketing site at the repository root.
 
 > Status: **M0 foundation** · October 2026
-> There is no application runtime in this directory yet. What exists is the part that is expensive to change later: scope, architecture decisions, security baseline, test strategy and the initial database schema.
+> The database, access helpers and a minimal API/worker request layer exist. Identity, roles, scopes, audit, production routes and queues are not implemented.
 
 ## First slice
 
@@ -81,14 +81,19 @@ set local app.tenant_id = '<tenant-uuid>';
 
 RLS denies all rows when the setting is absent. Tenant provisioning and pre-tenant membership discovery use a separate privileged path, not the runtime role.
 
+## Application skeleton
+
+`apps/api` and `apps/worker` contain the first request layer. Both use the shared `withTenantTransaction` helper from `@saasmodels/db`: the tenant comes only from the injected principal, the platform and module checks run through the runtime role, and the caller's query runs in the same transaction. The API exposes `/health`, `/v1/context` and proof routes; the worker exports `runTenantJob` without a queue or polling loop.
+
+Proof routes are disabled by default and enabled only by tests. The executable API authenticator returns no principal and logs that identity is not configured, so `/health` is the only route that can succeed until real identity lands. Authentication, roles, scopes and audit are not implemented; do not treat this skeleton as a production authentication layer.
+
 ## What comes next
 
-1. Bootstrap the API and worker (TypeScript, Fastify, Postgres) with tenant-context and entitlement middleware, plus an isolation test harness.
-2. Implement organisation provisioning, identity, memberships, role/scope authorization and audit.
-3. Build the People vertical: person, employment, salary structure, payroll run, payslip.
-4. Build Switch against CSV first, then greytHR; prove reconciliation before adding a second connector.
-5. Put one design partner's migrated history through a sandbox rehearsal.
-6. Prove a second module can be enabled on the same tenant without a data migration; CRM is the first candidate because it shares the client directory.
+1. Replace the API's null authenticator with real identity; organisation provisioning, memberships, role/scope authorization and audit follow.
+2. Build the People vertical: person, employment, salary structure, payroll run, payslip.
+3. Build Switch against CSV first, then greytHR; prove reconciliation before adding a second connector.
+4. Put one design partner's migrated history through a sandbox rehearsal.
+5. Prove a second module can be enabled on the same tenant without a data migration; CRM is the first candidate because it shares the client directory.
 
 ## Related documents
 
