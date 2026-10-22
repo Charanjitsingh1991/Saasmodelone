@@ -17,17 +17,20 @@ pnpm db:invite --tenant synthetic-co --email owner@example.test --days 7
 
 Every file is wrapped in a transaction. Do not edit an applied migration; add the next numbered file. The runner refuses an applied file whose checksum changed and records interrupted or failed migrations for manual resolution. Seeds are idempotent and may be rerun; they are not a substitute for the administrative path that changes module status.
 
+The reproducible local developer database is all five commands above in that order: `db:bootstrap`, `db:migrate` and `db:seed` alone leave the database with **no tenant and no user**, so nobody can sign in and every business table is empty; `db:provision` and `db:invite` are what put a synthetic tenant, owner and entitlement in place.
+
 `db:provision` is the only tenant-creation path in M0. It connects with `DB_OWNER_URL`, never the runtime URL, prints only the new tenant and owner IDs, and is not exposed by the API. It creates the tenant, owner user, owner membership, initial entitlements and the `tenant.provisioned` audit event in one transaction; a failure rolls all of it back.
 
 `db:invite` creates a one-time invitation for a user with an invited membership in the tenant. It connects with `DB_OWNER_URL`, never the runtime URL, validates the tenant slug, email and expiry window (1–30 days, default 7), revokes older unconsumed invitations for the same membership, and prints the invitation ID, tenant ID, email, expiry and the raw token exactly once with an out-of-band delivery warning. It does not print a password or connection string and is not exposed by the API. The invited user may be a first-time invitee or an already-active user being added to a second tenant; an active user must already hold a password, since acceptance reuses the existing credential rather than setting one.
 
 ## Database roles
 
-`pnpm db:bootstrap` creates three roles:
+`pnpm db:bootstrap` creates four roles:
 
 - `saas_owner` owns the database, schemas and tables and runs migrations, seeds and provisioning. It is not the application role.
 - `saas_runtime` is a login role that does not own tables and does not have `BYPASSRLS`. It serves tenant business data.
 - `saas_auth` is a login role that does not own tables and does not have `BYPASSRLS`. It serves identity lookups and session storage only.
+- `saas_worker` is a login role that does not own tables and does not have `BYPASSRLS`. It drains the `domain_event` outbox and holds no table or column privilege at all.
 
 ### Runtime role
 
@@ -72,6 +75,19 @@ Identity is global: `app_user.email` is unique across the platform, while member
 
 `auth_session` and `invitation` are deliberately not tenant-RLS-scoped. A session must be resolvable before `app.tenant_id` exists, and an invitation token is a pre-authentication credential. Forcing tenant RLS on either would require an owner-only or security-definer lookup keyed by tenant and token; no FORCE is enabled in a migration, and no such helper is tested. The auth role's grant allowlist and hashed random tokens are the boundary; tenant and membership checks still run in `withMemberTransaction` after session resolution.
 
+## Worker role
+
+`saas_worker` is created by `pnpm db:bootstrap` with `SAAS_WORKER_PASSWORD` and reached through `DB_WORKER_URL` (tests use `TEST_DB_WORKER_URL`). It is the narrowest role in the system:
+
+- `CONNECT` on the database, `USAGE` on `public` and `app`, no `CREATE` anywhere, no table or column privilege on anything, including `domain_event`, and no DDL or `TRUNCATE`.
+- `EXECUTE` on exactly four `0011_outbox.sql` helpers — `app.outbox_claimed_guard(integer, text, integer, integer)`, `app.outbox_claim(integer, text, integer, integer)`, `app.outbox_mark_published(uuid, text)` and `app.outbox_record_failure(uuid, text, integer, interval, text)` — plus the four access helpers the tenant transaction gate calls: `app.current_tenant_id()`, `app.has_platform_access()`, `app.has_module_read(text)` and `app.has_module_write(text)`. It has no `EXECUTE` on `app.current_member_role()`, `has_switch_access()`, `has_active_module()`, any `app.auth_*` helper or any administrative procedure.
+
+The four outbox helpers are owner-owned `SECURITY DEFINER` functions with `set search_path = ''`, fully qualified names, no dynamic SQL, argument range validation in one shared guard, and `EXECUTE` revoked from `PUBLIC`. Each one filters explicitly on `app.tenant_id` and raises when that setting is unset or not a valid UUID; because the owner bypasses RLS by table ownership, that filter — not a policy — is the tenant boundary, and a foreign event id raises rather than returning zero rows.
+
+Unlike the runtime and auth allowlists, the worker grants live in the migration rather than in `packages/db/sql/*.sql`. The blanket revokes in `runtime-grants.sql` target only `public` and `saas_runtime`, so they do not touch `saas_worker` and the grants survive every re-apply. `tests/schema-inventory.test.ts` asserts the worker's executable-function list and its zero table privileges exactly, which is where any drift becomes a test failure.
+
+Delivery is at-least-once: `attempts` increments at claim, an expired lease lets another worker re-claim, and `mark_published` and `record_failure` act only while the caller's lease timestamp is still live, so a late write from a lost lease is refused. `dead` after `max_attempts` is terminal. Handlers must be idempotent.
+
 ## Conventions
 
 - `id uuid` primary key, application-generated UUIDv7; `gen_random_uuid()` is a fallback.
@@ -109,6 +125,7 @@ Identity is global: `app_user.email` is unique across the platform, while member
 | `0008_platform_access.sql` | tenant.is_internal, module_entitlement.read_until, app.has_platform_access(), app.has_module_read(), app.has_module_write(), app.has_switch_access(), app.has_active_module() (alias), app.apply_module_policies() and the module RLS policies |
 | `0009_member_access.sql` | app.current_member_role() |
 | `0010_identity.sql` | auth_session, invitation, app.auth_tenant_by_slug(), app.auth_tenant_by_id(), app.auth_credentials(), app.auth_membership_status(), app.auth_activate_membership() |
+| `0011_outbox.sql` | domain_event lease columns (`status`, `lease_owner`, `lease_expires_at`, `next_attempt_at`), `domain_event_claim_idx`, app.outbox_claimed_guard(), app.outbox_claim(), app.outbox_mark_published(), app.outbox_record_failure() and the `saas_worker` grants |
 
 `person` is created in `0002_people.sql` and `client` in `0003_work.sql`, but both are shared directory records. Ownership is the architecture contract, not the migration filename.
 
@@ -128,6 +145,7 @@ A payroll run records the exact rule packs it used. Changing a rule means adding
 ## Not yet included
 
 - Row-level partitioning for very large audit/event tables.
+- Outbox producers and deployed consumers. 0011 gives the queue its claim mechanics and `saas_worker` its helpers, and `apps/worker` has the pass and polling loop, but no M0 write path inserts a `domain_event` row in its own transaction, no production handler is registered and no worker process is started by any deployable. There is also no purge or retention policy for `published` and `dead` rows and no dead-letter read surface.
 - Retention jobs and legal holds.
 - Full-text search indexes (permission-aware search is a service concern).
 - Reporting views and materialized margin views.

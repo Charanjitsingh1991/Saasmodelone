@@ -14,8 +14,11 @@ const UUID_PATTERN =
 const MODULE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,62}$/;
 
 declare const runtimePoolBrand: unique symbol;
+declare const workerPoolBrand: unique symbol;
 
 export type RuntimePool = Pool & { readonly [runtimePoolBrand]: true };
+
+export type WorkerPool = Pool & { readonly [workerPoolBrand]: true };
 
 export type MemberContext = {
   role: MembershipRole;
@@ -108,6 +111,18 @@ export function createRuntimePool(connectionString: string): RuntimePool {
   return pool as RuntimePool;
 }
 
+// saas_worker holds no table privileges; it can only run tenant jobs through
+// the outbox and access-helper functions granted in 0011_outbox.sql.
+export function createWorkerPool(connectionString: string): WorkerPool {
+  const pool = new Pool({
+    connectionString,
+    max: 5,
+    idleTimeoutMillis: 10_000,
+    application_name: 'saasmodels-worker',
+  });
+  return pool as WorkerPool;
+}
+
 function oneAllowed(rows: { allowed: boolean }[]): boolean {
   const row = rows[0];
   if (!row) {
@@ -145,7 +160,7 @@ function assertMembershipRole(value: string | null | undefined): MembershipRole 
  * withMemberTransaction or they lose role enforcement.
  */
 export async function withTenantTransaction<T>(
-  pool: RuntimePool,
+  pool: RuntimePool | WorkerPool,
   options: TenantTransactionOptions,
   fn: (client: PoolClient) => Promise<T>,
 ): Promise<T> {

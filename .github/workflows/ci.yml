@@ -39,13 +39,16 @@ jobs:
       DB_OWNER_URL: postgres://saas_owner:ci-owner-password@localhost:5432/saasmodels
       DB_RUNTIME_URL: postgres://saas_runtime:ci-runtime-password@localhost:5432/saasmodels
       DB_AUTH_URL: postgres://saas_auth:ci-auth-password@localhost:5432/saasmodels
+      DB_WORKER_URL: postgres://saas_worker:ci-worker-password@localhost:5432/saasmodels
       TEST_DB_ADMIN_URL: postgres://postgres:postgres@localhost:5432/postgres
       TEST_DB_OWNER_URL: postgres://saas_owner:ci-owner-password@localhost:5432/saasmodels
       TEST_DB_RUNTIME_URL: postgres://saas_runtime:ci-runtime-password@localhost:5432/saasmodels
       TEST_DB_AUTH_URL: postgres://saas_auth:ci-auth-password@localhost:5432/saasmodels
+      TEST_DB_WORKER_URL: postgres://saas_worker:ci-worker-password@localhost:5432/saasmodels
       SAAS_OWNER_PASSWORD: ci-owner-password
       SAAS_RUNTIME_PASSWORD: ci-runtime-password
       SAAS_AUTH_PASSWORD: ci-auth-password
+      SAAS_WORKER_PASSWORD: ci-worker-password
     steps:
       - name: Check out
         uses: actions/checkout@v4

@@ -257,6 +257,24 @@ The journey is one test, not a full regression suite. It does not cover the dist
 
 What the drill proves: one logical dump of the current schema and synthetic data restores with full parity on the local PostgreSQL 17.9 developer database. What it does not prove: WAL archiving, point-in-time recovery, encryption at rest or in transit, retained or offsite copies, any schedule or RPO/RTO, and anything on PostgreSQL 16 or in CI. It is not part of `pnpm test` or the CI workflow.
 
+### 2.15 Outbox claim and worker delivery (M0)
+
+`tests/outbox.test.ts` (13 tests) runs the 0011 helpers and the `apps/worker` loop against one real disposable database with the real `saas_worker` role, created by `packages/testkit` from `TEST_DB_WORKER_URL`; events are inserted as `saas_owner` because no producer exists yet, and the queue is drained between tests so per-tenant claim counts stay exact. It covers:
+
+- `app.outbox_claim` refuses when `app.tenant_id` is unset or not a valid UUID, and rejects out-of-range batch, lease and attempt arguments.
+- `saas_worker` cannot `SELECT`, `INSERT`, `UPDATE` or `DELETE` `domain_event` directly (each rejected with `42501`).
+- `mark_published` and `record_failure` raise "not in this tenant" for a foreign event id under both tenant GUCs, the rolled-back transactions leave both rows untouched, and the following sweeps publish them.
+- An expired lease is re-claimable by a second worker (`attempts` 2) while the lost lease's mark is refused (`false`) and its failure record is refused (`refused`); the live lease publishes once.
+- Tenant A's pass claims exactly its own event, never observes tenant B's, and leaves B's row `pending` with `attempts` 0.
+- A handler that always throws is retried with backoff, reaches `dead` at `maxAttempts`, and is not claimed again; a failed attempt is not claimable before `next_attempt_at`, is left unowned (`lease_owner` and `lease_expires_at` both null), and is claimed and published once the owner moves it due.
+- Duplicate delivery through an idempotent handler produces one net effect; a handler slower than its lease delivers twice but publishes once, with exactly one `refused` mark.
+- An unentitled tenant's pass returns `skipped: 'entitlement_denied'` and touches nothing while the entitled gate publishes the same event; a suspended tenant returns `platform_denied` and runs no handler.
+- `startOutboxWorker` polls on its interval, publishes the pending event, and stops cleanly (`stop()` halts delivery and `attempts` stays 1); malformed `workerId`, `batchSize` and `pollIntervalMs` are rejected before any query runs.
+
+`tests/worker.test.ts` keeps covering `runTenantJob` (tenant-scoped job, unentitled and suspended denial, rollback). `tests/harness.test.ts` adds the `saas_worker` identity matrix, the "no table privileges anywhere, helpers only" assertion and the refusal of catalog writes, DDL, `TRUNCATE` and self-granting. `tests/schema-inventory.test.ts` asserts the worker's exact privilege inventory: zero rows in `information_schema.role_table_grants` and `column_privileges`, and precisely the four outbox helpers plus `current_tenant_id`, `has_platform_access`, `has_module_read`, `has_module_write` as the only executable `app` functions, with the four helpers `prosecdef`.
+
+What this does not prove: no production producer emits events, so end-to-end delivery from a real state change to a real consumer is untested; the loop is not run under concurrency or across multiple worker processes; there is no queue-depth, latency or throughput measurement; no webhook or notification consumer exists.
+
 ---
 
 ## 3. Test data
@@ -276,7 +294,8 @@ The workflow at [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) is 
 - Type check, lint and import-boundary lint.
 - Unit, contract and integration tests.
 - Tenant isolation suite over the RLS tenant business tables, plus the explicit identity-table privilege tests.
-- Schema inventory: 66 tables with `tenant_id`, 64 RLS tables, exactly two no-RLS identity exceptions, no forced RLS, the exact runtime table grants and the eight person column grants.
+- Schema inventory: 66 tables with `tenant_id`, 64 RLS tables, exactly two no-RLS identity exceptions, no forced RLS, the exact runtime table grants, the eight person column grants, and the `saas_worker` surface (zero table and column privileges, exactly eight executable `app` functions, four of them security definer).
+- Outbox suite (§2.15): claim-helper guards, worker-role refusal of direct `domain_event` access, cross-tenant filtering, expired-lease re-claim, retry backoff and dead-lettering, duplicate delivery, and entitlement and suspension skips.
 - Module entitlement suite, including expiry, cancellation, dependency degradation and catalog write protection.
 - Authentication and session suite: login, invitation acceptance, cookie attributes, session expiry/revocation, CSRF/Origin checks and the auth-role privilege matrix.
 - Authorization matrix: the exact seven-role policy, role denial after entitlement, entitlement-before-role ordering, and `/v1/context` permissions and effective modules.

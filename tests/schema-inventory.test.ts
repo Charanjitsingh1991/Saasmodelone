@@ -266,4 +266,92 @@ describe('schema inventory', () => {
       await client.end();
     }
   });
+
+  // T13 deliberately adds saas_worker: CONNECT at bootstrap, schema usage
+  // and the eight EXECUTE grants below from 0011_outbox.sql. Any change to
+  // this inventory must be a reviewed migration, not a runtime grant.
+  test('grants the worker no table or column privileges at all', async () => {
+    const client = await ownerClient();
+    try {
+      const tableGrants = await client.query(
+        "select 1 from information_schema.role_table_grants where grantee = 'saas_worker'",
+      );
+      expect(tableGrants.rows).toEqual([]);
+
+      const columnGrants = await client.query(
+        "select 1 from information_schema.column_privileges where grantee = 'saas_worker'",
+      );
+      expect(columnGrants.rows).toEqual([]);
+
+      const domainEvent = await client.query<{ privilege: string; allowed: boolean }>(`
+        select p as privilege,
+               has_table_privilege('saas_worker', 'public.domain_event', p) as allowed
+          from unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) p
+         order by 1
+      `);
+      expect(domainEvent.rows.every((row) => !row.allowed)).toBe(true);
+    } finally {
+      await client.end();
+    }
+  });
+
+  test('grants the worker exactly the outbox and access-helper functions', async () => {
+    const client = await ownerClient();
+    try {
+      const executable = await client.query<{ proname: string }>(`
+        select p.proname
+          from pg_proc p
+          join pg_namespace n on n.oid = p.pronamespace
+         where n.nspname = 'app'
+           and has_function_privilege('saas_worker', p.oid, 'EXECUTE')
+         order by 1
+      `);
+      expect(executable.rows.map((row) => row.proname)).toEqual([
+        'current_tenant_id',
+        'has_module_read',
+        'has_module_write',
+        'has_platform_access',
+        'outbox_claim',
+        'outbox_claimed_guard',
+        'outbox_mark_published',
+        'outbox_record_failure',
+      ]);
+
+      const denied = await client.query<{ proname: string }>(`
+        select p.proname
+          from pg_proc p
+          join pg_namespace n on n.oid = p.pronamespace
+         where n.nspname = 'app'
+           and not has_function_privilege('saas_worker', p.oid, 'EXECUTE')
+           and p.proname in ('current_member_role', 'has_switch_access',
+                             'has_active_module', 'auth_activate_membership',
+                             'apply_module_policies', 'enable_tenant_rls',
+                             'block_mutation')
+         order by 1
+      `);
+      expect(denied.rows.map((row) => row.proname)).toEqual([
+        'apply_module_policies',
+        'auth_activate_membership',
+        'block_mutation',
+        'current_member_role',
+        'enable_tenant_rls',
+        'has_active_module',
+        'has_switch_access',
+      ]);
+
+      const definer = await client.query<{ proname: string; prosecdef: boolean }>(`
+        select p.proname, p.prosecdef
+          from pg_proc p
+          join pg_namespace n on n.oid = p.pronamespace
+         where n.nspname = 'app'
+           and p.proname in ('outbox_claim', 'outbox_mark_published',
+                             'outbox_record_failure', 'outbox_claimed_guard')
+         order by 1
+      `);
+      expect(definer.rows).toHaveLength(4);
+      expect(definer.rows.every((row) => row.prosecdef)).toBe(true);
+    } finally {
+      await client.end();
+    }
+  });
 });

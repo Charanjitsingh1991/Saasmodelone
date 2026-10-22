@@ -163,6 +163,7 @@ async function main(): Promise<void> {
         ownerPassword: required('SAAS_OWNER_PASSWORD'),
         runtimePassword: required('SAAS_RUNTIME_PASSWORD'),
         authPassword: required('SAAS_AUTH_PASSWORD'),
+        workerPassword: required('SAAS_WORKER_PASSWORD'),
         log,
       });
       log({ event: 'bootstrap.complete', ...result });

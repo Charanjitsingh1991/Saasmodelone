@@ -11,6 +11,7 @@ import {
   OWNER_ROLE,
   RUNTIME_ROLE,
   seed,
+  WORKER_ROLE,
 } from '@saasmodels/db';
 import { createTestDatabase, type TestDatabase } from '@saasmodels/testkit';
 
@@ -44,6 +45,12 @@ async function authClient(): Promise<Client> {
   return client;
 }
 
+async function workerClient(): Promise<Client> {
+  const client = new Client({ connectionString: db().workerUrl });
+  await client.connect();
+  return client;
+}
+
 beforeAll(async () => {
   database = await createTestDatabase({ migrate: false });
 });
@@ -55,7 +62,7 @@ afterAll(async () => {
 describe('local database harness', () => {
   test('fresh apply records every baseline migration and creates the schema', async () => {
     const expected = await listSqlFiles(migrationsDir);
-    expect(expected).toHaveLength(10);
+    expect(expected).toHaveLength(11);
 
     const result = await migrate({ ownerUrl: db().ownerUrl });
     expect(result.applied).toEqual(expected);
@@ -114,6 +121,10 @@ describe('local database harness', () => {
           'auth_credentials',
           'auth_membership_status',
           'auth_activate_membership',
+          'outbox_claim',
+          'outbox_mark_published',
+          'outbox_record_failure',
+          'outbox_claimed_guard',
         ]),
       );
     } finally {
@@ -675,6 +686,126 @@ describe('auth role privileges', () => {
         'select * from invitation',
         "insert into auth_session (user_id, tenant_id, token_hash, csrf_token, expires_at) values ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002', repeat('a', 64), repeat('b', 43), now() + interval '1 hour')",
         'update invitation set accepted_at = now()',
+      ];
+      for (const sql of forbidden) {
+        await expect(client.query(sql)).rejects.toMatchObject({ code: '42501' });
+      }
+    } finally {
+      await client.end();
+    }
+  });
+});
+
+describe('worker role privileges', () => {
+  test('is a non-owner login without elevated attributes', async () => {
+    const client = await workerClient();
+    try {
+      const identity = await client.query<{
+        current_user: string;
+        owner: string;
+        rolsuper: boolean;
+        rolcreaterole: boolean;
+        rolcreatedb: boolean;
+        rolbypassrls: boolean;
+        rolcanlogin: boolean;
+      }>(`
+        select
+          current_user,
+          (select pg_get_userbyid(datdba) from pg_database where datname = current_database()) as owner,
+          r.rolsuper,
+          r.rolcreaterole,
+          r.rolcreatedb,
+          r.rolbypassrls,
+          r.rolcanlogin
+        from pg_roles r
+        where r.rolname = current_user
+      `);
+      expect(identity.rows[0]).toEqual({
+        current_user: WORKER_ROLE,
+        owner: OWNER_ROLE,
+        rolsuper: false,
+        rolcreaterole: false,
+        rolcreatedb: false,
+        rolbypassrls: false,
+        rolcanlogin: true,
+      });
+    } finally {
+      await client.end();
+    }
+  });
+
+  test('has no table privileges anywhere and reaches the outbox only through helpers', async () => {
+    const client = await workerClient();
+    try {
+      const privileges = await client.query<{
+        domain_event_select: boolean;
+        domain_event_insert: boolean;
+        domain_event_update: boolean;
+        tenant_select: boolean;
+        membership_select: boolean;
+        outbox_functions: boolean;
+        access_helpers: boolean;
+      }>(`
+        select
+          has_table_privilege(current_user, 'public.domain_event', 'SELECT') as domain_event_select,
+          has_table_privilege(current_user, 'public.domain_event', 'INSERT') as domain_event_insert,
+          has_table_privilege(current_user, 'public.domain_event', 'UPDATE') as domain_event_update,
+          has_table_privilege(current_user, 'public.tenant', 'SELECT') as tenant_select,
+          has_table_privilege(current_user, 'public.membership', 'SELECT') as membership_select,
+          has_function_privilege(current_user, 'app.outbox_claim(integer, text, integer, integer)', 'EXECUTE') and
+          has_function_privilege(current_user, 'app.outbox_mark_published(uuid, text)', 'EXECUTE') and
+          has_function_privilege(current_user, 'app.outbox_record_failure(uuid, text, integer, interval, text)', 'EXECUTE') as outbox_functions,
+          has_function_privilege(current_user, 'app.has_platform_access()', 'EXECUTE') and
+          has_function_privilege(current_user, 'app.has_module_read(text)', 'EXECUTE') and
+          has_function_privilege(current_user, 'app.has_module_write(text)', 'EXECUTE') as access_helpers
+      `);
+      expect(privileges.rows[0]).toEqual({
+        domain_event_select: false,
+        domain_event_insert: false,
+        domain_event_update: false,
+        tenant_select: false,
+        membership_select: false,
+        outbox_functions: true,
+        access_helpers: true,
+      });
+
+      const denied = await client.query<{
+        switch_execute: boolean;
+        member_role_execute: boolean;
+        auth_execute: boolean;
+      }>(`
+        select
+          has_function_privilege(current_user, 'app.has_switch_access()', 'EXECUTE') as switch_execute,
+          has_function_privilege(current_user, 'app.current_member_role()', 'EXECUTE') as member_role_execute,
+          has_function_privilege(current_user, 'app.auth_activate_membership(uuid, uuid)', 'EXECUTE') as auth_execute
+      `);
+      expect(denied.rows[0]).toEqual({
+        switch_execute: false,
+        member_role_execute: false,
+        auth_execute: false,
+      });
+    } finally {
+      await client.end();
+    }
+  });
+
+  test('cannot write the outbox table, DDL or grant itself anything', async () => {
+    const client = await workerClient();
+    try {
+      const forbidden = [
+        'select * from domain_event',
+        "insert into domain_event (tenant_id, type, aggregate_type, aggregate_id) values ('00000000-0000-0000-0000-000000000001', 'probe', 'probe', '00000000-0000-0000-0000-000000000002')",
+        'update domain_event set attempts = 99',
+        'delete from domain_event',
+        'create table public.worker_probe (id integer)',
+        'create schema worker_probe',
+        'create database worker_probe',
+        'create role worker_probe login',
+        'grant saas_runtime to current_user',
+        'grant execute on function app.current_member_role() to saas_worker',
+        "call app.enable_tenant_rls('tenant')",
+        'call app.apply_module_policies()',
+        'select app.current_member_role()',
       ];
       for (const sql of forbidden) {
         await expect(client.query(sql)).rejects.toMatchObject({ code: '42501' });

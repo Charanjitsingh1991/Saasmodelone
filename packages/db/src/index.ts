@@ -25,7 +25,7 @@ export {
   verifyPassword,
 } from './auth.js';
 export type { BootstrapOptions, BootstrapResult } from './bootstrap.js';
-export { AUTH_ROLE, bootstrap, OWNER_ROLE, RUNTIME_ROLE } from './bootstrap.js';
+export { AUTH_ROLE, bootstrap, OWNER_ROLE, RUNTIME_ROLE, WORKER_ROLE } from './bootstrap.js';
 export {
   assertLocalDatabaseUrl,
   databaseUrlWithName,
@@ -69,9 +69,11 @@ export type {
   RuntimePool,
   TenantGate,
   TenantTransactionOptions,
+  WorkerPool,
 } from './tenant.js';
 export {
   createRuntimePool,
+  createWorkerPool,
   InvalidMembershipRoleError,
   InvalidTenantContextError,
   MembershipDeniedError,

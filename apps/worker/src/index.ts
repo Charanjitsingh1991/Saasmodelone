@@ -7,6 +7,18 @@ import {
 
 export const workerName = 'SaaSModels One worker';
 
+export type {
+  OutboxEvent,
+  OutboxHandler,
+  OutboxHandlerRegistry,
+  OutboxLoopOptions,
+  OutboxPassOptions,
+  OutboxPassResult,
+  OutboxSkipReason,
+  OutboxWorker,
+} from './outbox.js';
+export { runOutboxPass, startOutboxWorker } from './outbox.js';
+
 export type TenantJob<T> = {
   tenantId: string;
   gate?: TenantGate;

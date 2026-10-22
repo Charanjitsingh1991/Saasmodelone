@@ -53,7 +53,7 @@ describe('CI workflow contract', () => {
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => /^(?:TEST_DB_|DB_)[A-Z]+_URL:/.test(line));
-    expect(urls).toHaveLength(8);
+    expect(urls).toHaveLength(10);
     for (const url of urls) {
       expect(url).toContain('@localhost:5432/');
     }
@@ -61,6 +61,7 @@ describe('CI workflow contract', () => {
     expect(workflow).toMatch(/SAAS_OWNER_PASSWORD:\s*ci-owner-password/);
     expect(workflow).toMatch(/SAAS_RUNTIME_PASSWORD:\s*ci-runtime-password/);
     expect(workflow).toMatch(/SAAS_AUTH_PASSWORD:\s*ci-auth-password/);
+    expect(workflow).toMatch(/SAAS_WORKER_PASSWORD:\s*ci-worker-password/);
 
     const runLines = [...workflow.matchAll(/^\s+run:\s+(?!\|)(.+)$/gm)].map((match) =>
       match[1]?.trim(),

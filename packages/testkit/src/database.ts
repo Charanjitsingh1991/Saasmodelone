@@ -6,7 +6,9 @@ import {
   databaseUrlWithName,
   migrate,
   OWNER_ROLE,
+  RUNTIME_ROLE,
   seed,
+  WORKER_ROLE,
 } from '@saasmodels/db';
 
 export type TestDatabaseUrls = {
@@ -14,6 +16,7 @@ export type TestDatabaseUrls = {
   ownerUrl: string;
   runtimeUrl: string;
   authUrl: string;
+  workerUrl: string;
 };
 
 export type TestDatabase = {
@@ -21,6 +24,7 @@ export type TestDatabase = {
   ownerUrl: string;
   runtimeUrl: string;
   authUrl: string;
+  workerUrl: string;
   drop: () => Promise<void>;
 };
 
@@ -44,6 +48,7 @@ export function readTestDatabaseUrls(): TestDatabaseUrls {
     ownerUrl: assertLocalDatabaseUrl('TEST_DB_OWNER_URL', process.env.TEST_DB_OWNER_URL),
     runtimeUrl: assertLocalDatabaseUrl('TEST_DB_RUNTIME_URL', process.env.TEST_DB_RUNTIME_URL),
     authUrl: assertLocalDatabaseUrl('TEST_DB_AUTH_URL', process.env.TEST_DB_AUTH_URL),
+    workerUrl: assertLocalDatabaseUrl('TEST_DB_WORKER_URL', process.env.TEST_DB_WORKER_URL),
   };
 }
 
@@ -63,6 +68,7 @@ export async function createTestDatabase(
   const ownerSourceUrl = assertLocalDatabaseUrl('TEST_DB_OWNER_URL', urls.ownerUrl);
   const runtimeSourceUrl = assertLocalDatabaseUrl('TEST_DB_RUNTIME_URL', urls.runtimeUrl);
   const authSourceUrl = assertLocalDatabaseUrl('TEST_DB_AUTH_URL', urls.authUrl);
+  const workerSourceUrl = assertLocalDatabaseUrl('TEST_DB_WORKER_URL', urls.workerUrl);
   const name = makeDatabaseName(options.namePrefix ?? 'saasmodels_test');
   const databaseIdentifier = quoteIdentifier(name);
   const admin = new Client({ connectionString: adminUrl });
@@ -79,6 +85,18 @@ export async function createTestDatabase(
         `Role ${AUTH_ROLE} does not exist. Run pnpm db:bootstrap with SAAS_AUTH_PASSWORD set.`,
       );
     }
+    const runtime = await admin.query('select 1 from pg_roles where rolname = $1', [RUNTIME_ROLE]);
+    if (runtime.rowCount === 0) {
+      throw new Error(
+        `Role ${RUNTIME_ROLE} does not exist. Run pnpm db:bootstrap with SAAS_RUNTIME_PASSWORD set.`,
+      );
+    }
+    const worker = await admin.query('select 1 from pg_roles where rolname = $1', [WORKER_ROLE]);
+    if (worker.rowCount === 0) {
+      throw new Error(
+        `Role ${WORKER_ROLE} does not exist. Run pnpm db:bootstrap with SAAS_WORKER_PASSWORD set.`,
+      );
+    }
     await admin.query(`create database ${databaseIdentifier} owner ${quoteIdentifier(OWNER_ROLE)}`);
   } finally {
     await admin.end();
@@ -87,6 +105,7 @@ export async function createTestDatabase(
   const ownerUrl = databaseUrlWithName(ownerSourceUrl, name);
   const runtimeUrl = databaseUrlWithName(runtimeSourceUrl, name);
   const authUrl = databaseUrlWithName(authSourceUrl, name);
+  const workerUrl = databaseUrlWithName(workerSourceUrl, name);
 
   const drop = async (): Promise<void> => {
     const dropper = new Client({ connectionString: adminUrl });
@@ -110,5 +129,5 @@ export async function createTestDatabase(
     throw error;
   }
 
-  return { name, ownerUrl, runtimeUrl, authUrl, drop };
+  return { name, ownerUrl, runtimeUrl, authUrl, workerUrl, drop };
 }

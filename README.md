@@ -23,7 +23,7 @@ pnpm test
 
 `pnpm db:setup` runs three separate privileged steps:
 
-1. `db:bootstrap` creates `saas_owner`, `saas_runtime` and `saas_auth`, creates the `saasmodels` database owned by `saas_owner`, and removes PUBLIC creation rights.
+1. `db:bootstrap` creates `saas_owner`, `saas_runtime`, `saas_auth` and `saas_worker`, creates the `saasmodels` database owned by `saas_owner`, and removes PUBLIC creation rights.
 2. `db:migrate` applies `suite/db/migrations/*.sql` in order as `saas_owner`, records SHA-256 checksums in `infra.schema_migration`, and reapplies the runtime and auth grant allowlists.
 3. `db:seed` applies the idempotent module catalog.
 
@@ -54,14 +54,27 @@ The browser never stores the session token: `saas_session` is HttpOnly, and the 
 | `DB_OWNER_URL` | `saas_owner` | Migrations, seeds, provisioning, invitations |
 | `DB_RUNTIME_URL` | `saas_runtime` | Tenant business data through the application |
 | `DB_AUTH_URL` | `saas_auth` | Identity lookups and session storage |
+| `DB_WORKER_URL` | `saas_worker` | Outbox claiming and disposition through `app.outbox_*` helpers only |
 
 `saas_runtime` is not the table owner, does not have `BYPASSRLS`, cannot create schemas or tables, cannot write the module catalog, and cannot execute administrative procedures. `saas_auth` is a separate login role for identity only: it can read and update the identity columns it needs, manage `auth_session` and `invitation`, and has no access to tenant business data, the module catalog or audit. Its table and function grants are an explicit allowlist in [packages/db/sql/auth-grants.sql](packages/db/sql/auth-grants.sql), reapplied after every migration alongside the runtime allowlist.
 
+`saas_worker` is narrower still: it holds no table or column privilege anywhere, including on `domain_event`, and no DDL. It can execute exactly four outbox helpers plus `app.current_tenant_id`, `app.has_platform_access`, `app.has_module_read` and `app.has_module_write`, which is what the tenant transaction gate needs to run. Those grants live in [suite/db/migrations/0011_outbox.sql](suite/db/migrations/0011_outbox.sql), not in the runtime or auth allowlist files, because the blanket revokes in `runtime-grants.sql` target only `public` and `saas_runtime`; the worker surface is asserted as an exact list in [tests/schema-inventory.test.ts](tests/schema-inventory.test.ts).
+
 The harness refuses any database URL that does not point at localhost, `127.0.0.1`, `[::1]` or a Unix socket. It will not connect to a remote database.
+
+## Outbox worker
+
+[Suite/db/migrations/0011_outbox.sql](suite/db/migrations/0011_outbox.sql) adds the lease mechanics to the `domain_event` table shipped by 0001 (`status`, `lease_owner`, `lease_expires_at`, `next_attempt_at`, a partial `(tenant_id, occurred_at)` claim index) and four `SECURITY DEFINER` helpers in the `app` schema — `outbox_claimed_guard`, `outbox_claim`, `outbox_mark_published`, `outbox_record_failure` — that are searchable-path pinned, filter explicitly on `app.tenant_id` on every read and write, and raise when the GUC is unset or not a valid UUID. `EXECUTE` is granted only to `saas_worker`; the `PUBLIC` grant is revoked.
+
+`apps/worker` exports `runOutboxPass(pool, tenantId, options)` and `startOutboxWorker(pool, options)`. Each pass opens the tenant through `withTenantTransaction` with an entitlement gate (default `people`/`read`), claims up to `batchSize` (20) events under a `leaseSeconds` (60) lease, runs the registered handler for each event's `type` after the claim transaction closes, then marks published on success or records the failure with exponential backoff (`backoffSeconds` 2 doubling to `maxBackoffSeconds` 3600) and moves the event to `dead` once `attempts` reaches `maxAttempts` (5). `attempts` increments at claim only. A tenant that fails the platform or entitlement check is skipped with `platform_denied` or `entitlement_denied` and no handler runs. `startOutboxWorker` polls on `pollIntervalMs` per tenant in a `setTimeout` chain and is stopped with `stop()`.
+
+Delivery is at-least-once, not exactly-once: an expired lease lets a second worker re-claim a row while the first handler still runs, and the late `mark_published` or `record_failure` from the lost lease is refused because the helpers pin the lease timestamp. Handlers must therefore be idempotent, and the suite tests duplicate delivery, mid-run lease expiry, retry backoff, dead-lettering and cross-tenant invisibility against a real disposable database.
+
+No producer is wired. No current M0 write path can emit a domain event inside its own state-change transaction without redefining a reviewed 0010 identity helper or giving `saas_auth` a new cross-tenant write surface, so this task ships consumer machinery only: `domain_event` is empty in a seeded database, no process starts `startOutboxWorker`, no consumer other than test handlers exists, and there is no external broker, cron, webhook or deployment — the queue is Postgres alone. The first producer and a running consumer are M1 work. M0 has not exited.
 
 ## Authentication configuration
 
-The API requires `DB_RUNTIME_URL`, `DB_AUTH_URL` and `APP_ORIGIN`. `APP_ORIGIN` is the exact browser origin allowed to send state-changing requests; there is no wildcard and no proxy-header trust. `COOKIE_SECURE` defaults to true when `NODE_ENV=production` and can be overridden for local HTTP. `SAAS_AUTH_PASSWORD` is required by `db:bootstrap`; `TEST_DB_AUTH_URL` supplies the same role to the test harness.
+The API requires `DB_RUNTIME_URL`, `DB_AUTH_URL` and `APP_ORIGIN`. `APP_ORIGIN` is the exact browser origin allowed to send state-changing requests; there is no wildcard and no proxy-header trust. `COOKIE_SECURE` defaults to true when `NODE_ENV=production` and can be overridden for local HTTP. `SAAS_AUTH_PASSWORD` is required by `db:bootstrap`; `TEST_DB_AUTH_URL` supplies the same role to the test harness. `SAAS_WORKER_PASSWORD` is required by `db:bootstrap` for the same reason, and `DB_WORKER_URL` / `TEST_DB_WORKER_URL` supply that role to the worker and to the test harness.
 
 Email/password login uses Argon2id, and the browser holds only an opaque `saas_session` cookie whose SHA-256 hash is stored server-side. Identity is global (`app_user.email` is unique) while memberships are per tenant, so one user can sign in to several tenants with the same password. Invitations are created by the owner-only `pnpm db:invite` command and accepted once through the API; a first-time invitee sets a password, and an active user invited to a second tenant verifies its existing one. Login is rate-limited per source address and per email in memory, and auth responses are sent `Cache-Control: no-store`. The web shell has email/password sign-in and sign-out, a generic `401` message that does not identify the failing field, a distinct `429` message, and a retryable network state; credentials are not placed in the URL, logs, local storage or session storage. There is no password-reset, invitation-acceptance, MFA, OAuth, tenant-switching or session-management UI yet, and no email delivery, session rotation, device list or distributed rate limiting. These are target behaviours, not shipping features.
 

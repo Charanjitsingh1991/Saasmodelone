@@ -154,6 +154,12 @@ The physical migration files place some directory tables beside the module that 
 
 Domain events are written to an outbox in the same transaction as the state change. A worker delivers them to in-process handlers and later to webhooks. Every event carries the module code and the tenant.
 
+Status as of M0, stated in three parts:
+
+- **True today.** `domain_event` (0001) carries the lease columns, status and per-tenant claim index added by 0011, and four `app` schema `SECURITY DEFINER` helpers claim, publish and fail events for one tenant at a time. A dedicated `saas_worker` role holds no table privilege at all and reaches the queue only through those helpers. `apps/worker` runs per-tenant passes and a polling loop with a lease, backoff, dead-letter state and an entitlement gate. Delivery is at-least-once, so handlers must be idempotent.
+- **Machinery only.** No producer writes an event in its state-change transaction, so a freshly seeded and migrated `domain_event` is empty. Nothing starts the loop in any deployable process; no consumer is registered outside the test suite.
+- **Waiting for M1.** The first real producer per module, a deployed worker process, webhooks, and the import/notification/export consumers named in §4's event list.
+
 Examples:
 
 - `payroll.finalised` → project cost read model, audit, notifications.
