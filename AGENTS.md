@@ -11,9 +11,13 @@ Read before planning or editing, in this order:
 8. suite/docs/adr/*.md
 
 ## Non-negotiable
-1. Tenant isolation is a database property. Every tenant table has tenant_id,
-   RLS, and composite (tenant_id, id) foreign keys. Missing app.tenant_id means
-   no rows. The runtime role does not own tables and cannot bypass RLS.
+1. Tenant isolation is a database property. Every tenant business table has
+   tenant_id, RLS and a tenant_isolation policy, and cross-tenant references use
+   composite (tenant_id, id) foreign keys. The identity tables auth_session and
+   invitation carry tenant_id but deliberately have no RLS: the runtime role has
+   no privilege on either, and they are reached only through security-definer
+   auth functions. Missing app.tenant_id means no rows for RLS tables. The
+   runtime role does not own tables and cannot bypass RLS.
 2. Module access is an entitlement checked on the server, in this order:
    entitlement -> role -> scope. UI hiding is not authorization.
 3. One shared directory. Person and client identity live in the platform.
@@ -26,7 +30,9 @@ Read before planning or editing, in this order:
 7. No statutory rule is invented by a model or hard-coded in application code.
    Rules are versioned jurisdiction packs with effective dates and reviewer
    sign-off. Do not claim coverage for a jurisdiction that has no reviewed pack.
-8. Every export is complete. Cancelling a module never deletes its data.
+8. Every portability export is complete when it ships. Cancelling a module
+   never deletes its data. The M0 People directory identity CSV is a scoped
+   directory export, not the portability feature.
 
 ## Working rules
 - Migrations in suite/db are reviewed baseline artifacts. Change them with new

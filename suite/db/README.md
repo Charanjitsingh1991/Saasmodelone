@@ -75,7 +75,7 @@ Identity is global: `app_user.email` is unique across the platform, while member
 ## Conventions
 
 - `id uuid` primary key, application-generated UUIDv7; `gen_random_uuid()` is a fallback.
-- Every tenant table has `tenant_id`, RLS enabled and a `tenant_isolation` policy.
+- Every tenant business table has `tenant_id`, RLS enabled and a `tenant_isolation` policy. The identity tables `auth_session` and `invitation` are the only exceptions: they carry `tenant_id` but have no RLS, the runtime role has no privilege on either, and they are reached only through security-definer auth functions. Missing `app.tenant_id` means no rows for RLS tables.
 - Cross-tenant parent references use composite `(tenant_id, id)` foreign keys. Parent tables expose `unique (tenant_id, id)`.
 - Money: `bigint` minor units plus `currency char(3)`. Never `float`/`real`.
 - Percentages: `numeric(7,4)`.

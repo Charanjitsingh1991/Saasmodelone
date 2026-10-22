@@ -16,8 +16,8 @@ Deliverables:
 - Shared person and client directory, owned by the platform rather than a module.
 - PostgreSQL schema applied to a local instance and reviewed by a second engineer.
 - API/worker skeleton with tenant-context, entitlement and role checks; email/password login, opaque server-side sessions and one-time invitation acceptance; authenticated access-denial audit; a streaming People directory CSV export; plus a test harness.
-- CI pipeline with type check, lint, tests, secret scan and dependency audit.
-- Threat model reviewed; design-partner gate drafted.
+- CI workflow authored with type check, lint, boundary lint, tests, secret scan, dependency audit and a PostgreSQL 16/17 matrix. It has not run because there is no Git remote; PostgreSQL 16 remains unproven.
+- Draft threat model and M0 evidence pack; human review pending. Design-partner gate drafted.
 
 Exit criteria:
 
@@ -30,7 +30,7 @@ Exit criteria:
 - A test proves role authorization is enforced after entitlement: an entitled module with a role that lacks the permission returns `ROLE_DENIED`, and an unentitled module returns `MODULE_NOT_ENTITLED` without disclosing role policy.
 - A test proves the People directory export returns only the session tenant's seven identity fields, rejects an unentitled or role-denied request without CSV bytes, and commits its export audit event before the first byte.
 
-Progress (October 2026): database and API tests prove tenant isolation, platform access, module entitlement, the auth-role boundary and the M0 role matrix with real sessions. Email/password login, session validation, logout, one-time invitation acceptance, role authorization for People and Work, authenticated access-denial audit and the streaming People directory CSV export exist. M0 has **not** exited: there is no web UI, People data-entry route or screen, scope enforcement or payroll, so the signed-in People-screen criterion and the CI/secret-scan items remain open.
+Progress (October 2026): database and API tests prove tenant isolation, platform access, module entitlement, the auth-role boundary and the M0 role matrix with real sessions. Email/password login, session validation, logout, one-time invitation acceptance, role authorization for People and Work, authenticated access-denial audit and the streaming People directory CSV export exist. A working-tree secret scanner for tracked and untracked non-ignored regular files, a production dependency audit, a schema/privilege inventory over 66 tenant-id tables, a CI workflow contract test, the draft threat model in [`security/m0-threat-model.md`](security/m0-threat-model.md) and the interim evidence pack in [`release/m0-evidence.md`](release/m0-evidence.md) exist. M0 has **not** exited: there is no web UI, People data-entry route or screen, scope enforcement or payroll. The CI workflow has never run on GitHub (no remote), so PostgreSQL 16 is unproven; the threat model has no named owner or human review; and the signed-in People-screen criterion, restore drill and design-partner gate remain open.
 
 ## M1 — Internal People payroll
 

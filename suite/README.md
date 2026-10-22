@@ -3,7 +3,7 @@
 This directory is the engineering project for **SaaSModels One**, the commercial product. It is deliberately separate from the marketing site at the repository root.
 
 > Status: **M0 foundation** · October 2026
-> The database, access helpers, a minimal API/worker request layer, membership verification, audited provisioning/entitlements, email/password login, opaque server-side sessions, one-time invitation acceptance, server-side role authorization for People and Work, authenticated access-denial audit, and a streamed People directory CSV export with column-level runtime grants and pre-disclosure export audit exist. Scope authorization, role administration, employee self-scope, password reset, MFA, OAuth, email delivery, tenant switching, session rotation and device lists, further production module routes, queues, audit read APIs, export UI and other UI are not implemented.
+> The database, access helpers, a minimal API/worker request layer, membership verification, audited provisioning/entitlements, email/password login, opaque server-side sessions, one-time invitation acceptance, server-side role authorization for People and Work, authenticated access-denial audit, and a streamed People directory CSV export with column-level runtime grants and pre-disclosure export audit exist. A working-tree secret scanner covering tracked and untracked non-ignored regular files, production dependency audit, schema/privilege inventory, CI workflow contract test, draft threat model and interim M0 evidence pack exist. The CI workflow has never run because there is no Git remote. Scope authorization, role administration, employee self-scope, password reset, MFA, OAuth, email delivery, tenant switching, session rotation and device lists, further production module routes, queues, audit read APIs, export UI and other UI are not implemented.
 
 ## First slice
 
@@ -29,7 +29,11 @@ suite/
   README.md
   docs/
     architecture.md          system shape, module catalog, entitlements, boundaries, deployment
-    security.md              threat model, baseline controls, design-partner gate
+    security.md              baseline controls, target controls, design-partner gate
+    security/
+      m0-threat-model.md     draft M0 threat model, not reviewed or approved
+    release/
+      m0-evidence.md         interim M0 evidence pack; M0 has not exited
     testing.md               non-negotiable suites and CI gates
     roadmap.md               M0–M4 with exit criteria
     adr/                     decisions that are costly to reverse
@@ -52,7 +56,7 @@ suite/
 
 ## Non-negotiable rules
 
-1. **Tenant isolation is a database property.** Every tenant table carries `tenant_id`, has RLS enabled, and cross-tenant references are blocked by composite foreign keys.
+1. **Tenant isolation is a database property.** Every tenant business table carries `tenant_id`, has RLS enabled and has a `tenant_isolation` policy; cross-tenant references are blocked by composite foreign keys. The identity tables `auth_session` and `invitation` are the only exceptions: they carry `tenant_id` but deliberately have no RLS, the runtime role has no privilege on either, and they are reached only through security-definer auth functions.
 2. **Module access is an entitlement, checked on the server.** A licensed module is not a UI flag. Every module request resolves entitlement + role + scope in that order; M0 implements the first two and defers scope to M1. The database helpers `app.has_module_read('<code>')` and `app.has_module_write('<code>')` enforce tenancy and entitlement, not role; they are the second line of defence. `app.has_active_module('<code>')` remains as a compatibility delegate to the write helper.
 3. **One shared directory.** Person and client identity live in the platform. Modules extend those records; none creates a parallel employee or client table.
 4. **Money is integer minor units.** `bigint` plus currency. No floating point in payroll or billing.
@@ -76,7 +80,7 @@ pnpm db:invite --tenant synthetic-co --email owner@example.test
 
 The module catalog is reference data, seeded once and updated by migration. A tenant is then granted entitlements; the catalog itself is not writable by the runtime role. Provisioning and entitlement changes run through owner-only libraries and audit in the same transaction.
 
-The migrations and seed are applied by the repository harness against a real local PostgreSQL 17 instance, with fresh-apply, checksum, role-privilege, access-helper, RLS policy, membership, provisioning, audit, authentication and People-directory-export suites. PostgreSQL 16 in CI is planned for T10, and a restore drill is still required before real data — see `db/README.md` and `docs/roadmap.md`.
+The migrations and seed are applied by the repository harness against a real local PostgreSQL 17 instance, with fresh-apply, checksum, role-privilege, access-helper, RLS policy, membership, provisioning, audit, authentication, People-directory-export and schema-inventory suites. `scripts/secret-scan.ts` scans tracked and untracked non-ignored regular files (not history, ignored files, packed objects or remote state), and `pnpm audit --prod --audit-level high` checks production dependencies. The CI workflow at the repository root declares a PostgreSQL 16/17 matrix, but it has not run because there is no Git remote; PostgreSQL 16 is unproven. A restore drill is still required before real data. See `db/README.md`, `docs/release/m0-evidence.md` and `docs/roadmap.md`.
 
 The application connects as a role that does **not** own the tables. Tenant and user context are set per transaction:
 

@@ -1,0 +1,99 @@
+# M0 threat model
+
+Status: **draft for review** · 22 October 2026
+
+This threat model covers the M0 foundation only: synthetic tenants, local PostgreSQL, a minimal API/worker request layer and no web UI. It has not been reviewed or approved by a named human security owner, and no independent penetration test has been performed. M0 is not production-ready. Do not load real customer, payroll, bank, statutory-identifier or design-partner data into this build. The design-partner gate in [`../security.md`](../security.md) remains unticked.
+
+The baseline controls and target controls are in [`../security.md`](../security.md); schema and privilege conventions are in [`../../db/README.md`](../../db/README.md); tenancy and migration decisions are recorded in [`../adr/0002-postgres-rls-tenancy.md`](../adr/0002-postgres-rls-tenancy.md), [`../adr/0003-migration-staging-and-promotion.md`](../adr/0003-migration-staging-and-promotion.md) and [`../adr/0005-modules-and-entitlements.md`](../adr/0005-modules-and-entitlements.md).
+
+## 1. Assets
+
+- Tenant business data: people, employment, projects, entitlements and audit events.
+- Identity data: `app_user` password hashes, memberships, invitations and opaque session tokens.
+- The People directory CSV: seven identity fields per non-deleted person in the session tenant.
+- The audit trail: provisioning, entitlement changes, authenticated access denials and People exports.
+- Database and CI credentials: `saas_owner`, `saas_runtime`, `saas_auth`, database URLs and CI-only dummy credentials.
+- Availability of the API, database and export path.
+- Repository integrity: migrations, grants, workflow and lockfile.
+
+## 2. Actors
+
+- Tenant member with a role: owner, admin, HR, finance, manager, employee or auditor.
+- Tenant administrator acting through the owner-only CLIs.
+- Platform operator with `saas_owner` or superuser access.
+- Unauthenticated internet client or credential-stuffing attacker.
+- Malicious or compromised dependency, GitHub Action or CI runner.
+- Insider with repository or database access.
+
+## 3. Trust boundaries and data flows
+
+1. **Browser → API.** The browser presents an opaque `saas_session` cookie. State-changing requests require an exact `Origin`; logout also requires the CSRF token. There is no web login UI in M0.
+2. **API → PostgreSQL as `saas_runtime`.** Each protected request opens a member transaction, sets `app.tenant_id` and `app.user_id` transaction-locally, resolves the membership role, checks platform access, entitlement and role permission, then runs explicit SQL under RLS. The runtime role is not the table owner, has no `BYPASSRLS`, no DDL and only the reviewed grants.
+3. **API → PostgreSQL as `saas_auth`.** Login, session lookup, membership status and invitation acceptance use narrow identity grants and security-definer functions before a tenant transaction exists. `auth_session` and `invitation` carry `tenant_id` but deliberately have no RLS; the runtime role cannot reach them.
+4. **Operator CLI → PostgreSQL as `saas_owner`.** Provisioning, entitlement changes and invitation creation are owner-only paths, never API routes. They write audit rows in the same transaction.
+5. **API → People CSV.** `GET /v1/people/export` uses two member transactions: a durable export audit row before the first byte, then a gateway-rechecked server-side cursor and streamed CSV. The response is not stored.
+6. **Worker.** `runTenantJob` uses the system-only `withTenantTransaction`, which does not check membership. There is no queue, polling loop or outbox consumer yet.
+7. **CI.** GitHub Actions checks out the repository read-only, starts an ephemeral PostgreSQL service, installs with a frozen lockfile, scans tracked and untracked non-ignored regular files, audits production dependencies and runs the suites against localhost-only dummy credentials. There is no Git remote and the workflow has not executed on GitHub.
+8. **Web UI.** Absent. `apps/web` has no server, route or People screen; there is no browser test.
+
+## 4. Threat table
+
+Risk ratings are qualitative for M0, not a formal risk register.
+
+| ID | Threat | Impact | Current control | Verifying test or control | Residual risk |
+| --- | --- | --- | --- | --- | --- |
+| T1 | Cross-tenant read or write through SQL or the API | Critical | `tenant_id` on 66 public tables; RLS and permissive `tenant_isolation` on 64 tenant-scoped tables; composite tenant foreign keys; runtime is a non-owner without `BYPASSRLS`; session tenant is the only tenant source | `tests/module-rls.test.ts`: cross-tenant reads/updates/deletes see zero rows, cross-tenant insert is rejected. `tests/api.test.ts`: tenant A/B isolation and forged tenant attempts. `tests/schema-inventory.test.ts`: inventory and exceptions. | Two identity tables (`auth_session`, `invitation`) have no RLS by design; runtime has no privileges on them. Owner and superuser paths are outside RLS. No independent penetration test. |
+| T2 | Missing or unset tenant context returns all rows | Critical | `app.current_tenant_id()` returns null when unset; RLS treats null as no rows; platform helpers deny without context | `tests/module-rls.test.ts`: without a tenant context the runtime sees no employment or project rows. `tests/platform-access.test.ts`: helpers deny everything without a tenant context. | The auth role can read identity rows before tenant context exists; that path is narrow but not RLS-scoped. |
+| T3 | Pooled connection leaks tenant, user or role between requests | Critical | `set local` transaction settings; membership resolved per transaction; client released on every path; tests reuse one pool across tenants/users | `tests/membership.test.ts`: sequential users through one pool do not leak. `tests/api.test.ts`: sequential tenants and users through one pool do not leak context or role. | No production pooler or distributed deployment yet; pooling under pgbouncer-style transaction pooling is untested. |
+| T4 | Entitlement bypass: unlicensed module reached through API, export or job | High | `withMemberTransaction` checks membership, platform access, entitlement and role in that order; restrictive module RLS policies are a second line | `tests/membership.test.ts`: role denial after entitlement and entitlement-before-role. `tests/module-rls.test.ts`: tenant A cannot read any project row. `tests/worker.test.ts`: unentitled job fails before callback. `tests/people-export.test.ts`: Work-only tenant receives `MODULE_NOT_ENTITLED`. | Only `employment` and `project` have full runtime table grants; the other module tables are not yet exercised through API paths. |
+| T5 | Role bypass: a member performs an action outside their permission | High | Shared contracts policy; role resolved from `membership`, never a header; route gate passes the role to the callback; unknown role is a data-integrity error | `tests/authorization.test.ts`: exact seven-role matrix and fail-closed policy. `tests/membership.test.ts`: entitled employee denied `ROLE_DENIED` before callback. `tests/api.test.ts`: role denial and context permissions. | Role is enforced in the application layer only; grants and RLS do not know the membership role. Scope authorization is M1. |
+| T6 | Suspended, closed or deleted tenant continues to read or write | High | `app.has_platform_access()` at request and helper layers; module policies call it; soft delete is checked | `tests/platform-access.test.ts`: helpers deny suspended/closed/deleted tenants. `tests/module-rls.test.ts`: suspended/closed/deleted tenants cannot read or insert employment. `tests/api.test.ts`: denied on context and proof routes. | No production offboarding or deletion workflow; retention and purge are not built. |
+| T7 | Session theft, replay or use after membership change | High | 32-byte opaque token, SHA-256 hash at rest, `HttpOnly`, `SameSite=Strict`, `Path=/`, `Secure` when configured, 12-hour absolute expiry, server-side revocation; membership/platform checks on every request; disabled user fails immediately | `tests/authentication.test.ts`: token stored hashed, expired/revoked/tampered/disabled sessions rejected, disabled user loses an existing session immediately, logout revokes one session. | No MFA, rotation, device list, binding or theft detection. A stolen cookie is valid until expiry or logout. |
+| T8 | Credential stuffing or brute force against login/invitation acceptance | High | Argon2id; uniform failure responses; in-memory per-address and per-email login limits; per-address invitation limit | `tests/authentication.test.ts`: per-address and per-email limits, invitation limit, indistinguishable failures. | Limiter is per process and resets on restart; no edge/WAF or distributed limiter; no account lockout or MFA. |
+| T9 | CSRF on a state-changing request | High | Exact `Origin` match on every state-changing request; CSRF token required for logout; `SameSite=Strict` cookie | `tests/authentication.test.ts`: exact Origin required, logout without or with a wrong CSRF token is rejected. | There are no other state-changing API routes yet; origin handling behind a proxy is not tested. |
+| T10 | SQL injection | High | Parameterised queries; explicit static SQL; no caller-controlled identifiers; no ORM that hides RLS | Code review; `pnpm lint`/typecheck. There is no dedicated injection test suite. | Not proven by an adversarial test; dynamic SQL exists only in reviewed migration procedures. |
+| T11 | Sensitive-field exposure through the People export | High | Seven-column select; no `select *`; column-level runtime grant; personal contact, date of birth, gender, status, designation, employment, tax and bank data have no runtime grant; RLS tenant scope; no `tenant_id` predicate from the caller | `tests/people-export.test.ts`: exact CSV, forbidden values absent, tenant overrides ignored, grant test. `tests/schema-inventory.test.ts`: exactly eight person column grants and no table privilege. | Any member with `people.read` can export the directory; there is no dedicated export permission. No export rate limit. |
+| T12 | Spreadsheet formula injection from exported names or codes | Medium | Leading `=`, `+`, `-`, `@`, tab or CR is prefixed with `'` before RFC 4180 quoting; CRLF records | `tests/csv.test.ts`: all six prefixes, quoting, newlines, Unicode. `tests/people-export.test.ts`: formula-like fixture values in the streamed body. | Client spreadsheet behaviour varies; the mitigation reduces, but does not eliminate, formula risk. |
+| T13 | Export abuse or denial of service | Medium | Server-side cursor, batched `FETCH`, backpressure, rollback on client close, no server-side buffering of the full result | `tests/people-export.test.ts`: multiple batches and exact stream. `tests/csv-stream.test.ts`: drain, close and error paths. | No export rate limit, concurrency cap, row cap or tenant-level quota. Accepted only for synthetic M0 data. |
+| T14 | Audit evasion or tampering | High | Append-only trigger blocks update/delete for owner and runtime; runtime has only `INSERT` on `audit_event`; export audit commits before disclosure; provisioning/entitlement audit is transactional | `tests/governance.test.ts`: owner and runtime cannot update/delete, runtime cannot insert for another tenant, audit failure rolls back an employment insert. `tests/api.test.ts`: denial audit. `tests/people-export.test.ts`: one export row and fail-closed audit failure. | No audit read API, SIEM export, retention job or legal hold. Denial audit is best-effort and can fail while the denial is still returned. Auth events and payroll actions are not audited. |
+| T15 | Audit metadata leaks secrets or request data | High | Denial metadata uses reason, method, route template, and optional module/operation/permission; export metadata is module, format and column names; raw URL, headers, cookies, tokens, email, role, slug and row data are excluded | `tests/api.test.ts`: route template only, no raw query. `tests/people-export.test.ts`: metadata allowlist and no tenant/token/email/person data. | Metadata fields are not schema-constrained beyond the writer; future actions need the same review. |
+| T16 | Secrets committed to the repository or CI | High | `.gitignore` excludes `.env`; no secrets in Git or CI; working-tree scanner over tracked and untracked non-ignored regular files for key blocks, token formats, session-cookie values and sensitive paths; CI uses dummy localhost credentials and read-only permissions | `tests/secret-scan.test.ts`: content/path rules, tracked and untracked discovery, ignored-file exclusion, redaction, binary and symlink skip, temp repository, clean repository. `tests/ci-workflow.test.ts`: no `secrets.*`. `pnpm secret-scan`. | Scanner is regex-based and scans only regular files; Git history, ignored files, packed objects and remote state are out of scope. It cannot prove absence, only detect known shapes. |
+| T17 | Dependency or GitHub Action supply-chain compromise | High | Frozen lockfile; production dependency audit; checkout credentials not persisted; only `actions/checkout@v4` and `actions/setup-node@v4`; top-level `contents: read`; no remote or secrets configured | `tests/ci-workflow.test.ts`: action allowlist, read-only permissions, no secrets. `pnpm audit --prod --audit-level high`. | Actions are pinned by tag, not commit SHA. No Dependabot, provenance verification, SBOM or branch protection. The workflow has not executed on GitHub. |
+| T18 | Migration or checksum tampering | High | Checked-in SQL, SHA-256 ledger, runner refuses changed, interrupted or failed migrations; reviewed files are forward-only | `tests/harness.test.ts`: tampered applied migration rejected by checksum; second migrate is a no-op; fresh apply records every baseline. | `saas_owner` can alter the ledger or schema directly; no signed migrations, drift detection or protected branch yet. |
+| T19 | Database over-privilege or grant drift | High | Runtime is not owner, no `BYPASSRLS`, no DDL/TRUNCATE; explicit table/column allowlist reapplied after every migrate; auth role is narrower still | `tests/harness.test.ts`: role privilege matrix. `tests/people-export.test.ts`: person column grant. `tests/schema-inventory.test.ts`: exact table grants, 64 RLS tables, exceptions, no FORCE. | The person column grant expands the runtime read surface; it is limited to the export route by convention, not by a database constraint. No continuous drift monitor. |
+| T20 | Error, log or response leakage | Medium | Sanitized 500 responses; no SQL, stack, token or password in API responses; auth responses `no-store`; no exception detail returned | `tests/api.test.ts`: unknown errors are a sanitized 500. `tests/authentication.test.ts`: no password hash, raw token or SQL text in responses. | Production logging and redaction are not implemented; Fastify error logs could contain request context once logging is enabled. |
+| T21 | Worker system transaction used from a member request | High | `withTenantTransaction` is system-only and does not check membership; worker entry point is separate from API routes; API imports the member helper | `tests/worker.test.ts`: tenant-scoped job, unentitled/suspended denial, rollback. Import boundaries keep apps separate. | A future route could import the system helper; enforcement is code review and import discipline, not a database guard. No worker loop or queue yet. |
+| T22 | Data loss, over-retention or inability to investigate | Critical | None for M0 beyond synthetic test databases | No backup/restore, retention/legal-hold, offboarding or audit-read test exists. | Not mitigated. No backup and restore drill, retention jobs, legal holds, customer export/offboarding or audit read surface. Accepted only because M0 holds synthetic data. |
+
+## 5. Disposition
+
+### Mitigated and tested
+
+T1, T2, T3, T4, T5, T6, T9, T11, T12, T14, T15, T16, T18, T19 and T21 have a control and a named automated test in the table above. Tests use a real disposable PostgreSQL database, the real runtime/auth roles and real cookies; they do not mock RLS.
+
+### Mitigated but not tested
+
+- T7 and T8 are partially mitigated: hashing, session expiry/revocation, uniform failures and in-memory rate limits are tested, but MFA, rotation, device binding, edge limiting and distributed limiting are absent.
+- T10 relies on explicit parameterised SQL and code review; there is no dedicated injection test.
+- T13 relies on streaming design and backpressure tests, but abuse resistance is not tested.
+- T17 relies on the frozen lockfile, the local production audit and the workflow contract; the workflow has not run, and actions are not SHA-pinned.
+- T20 has response tests, but production logging and redaction are not built.
+
+### Not mitigated or accepted only for the M0 foundation
+
+- T22 as a whole: backup/restore drill, retention, legal holds, offboarding, complete export and audit read surface.
+- MFA, session rotation, device lists, distributed rate limiting and authentication-event audit.
+- A dedicated export permission, export rate limiting and export history.
+- Scope authorization, employee self-scope, role administration and seat enforcement.
+- A named security owner, independent penetration test, incident exercise and production monitoring.
+- Real customer data. It must not be loaded into M0.
+
+## 6. Review questions
+
+1. Are the two auth-table RLS exceptions (`auth_session`, `invitation`) acceptable, given the runtime role has no privilege on either and access goes through security-definer functions?
+2. Is the person column-level grant narrow enough for the People export, and should the route be the only caller by review rather than database enforcement?
+3. What concurrency and size limits are required before an export route is exposed beyond synthetic data?
+4. Which audit events and read surfaces are mandatory before a design partner imports real records?
+5. Which open-source or hosted dependency and Action provenance controls are required before a Git remote is added?
+
+Until those questions have named owners and the design-partner gate is satisfied, this document is a draft, not an approval to handle real data.

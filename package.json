@@ -13,6 +13,8 @@
     "lint:boundaries": "eslint apps packages tests",
     "typecheck": "tsc -p tsconfig.tools.json --noEmit && pnpm -r --if-present typecheck",
     "test": "vitest run",
+    "secret-scan": "node --import tsx scripts/secret-scan.ts",
+    "ci:verify": "pnpm typecheck && pnpm lint && pnpm lint:boundaries && pnpm secret-scan && pnpm audit --prod --audit-level high && pnpm test",
     "db:bootstrap": "node --import tsx packages/db/src/cli.ts bootstrap",
     "db:migrate": "node --import tsx packages/db/src/cli.ts migrate",
     "db:seed": "node --import tsx packages/db/src/cli.ts seed",

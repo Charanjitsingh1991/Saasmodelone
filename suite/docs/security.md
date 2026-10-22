@@ -32,7 +32,7 @@ Threats we design against first:
 
 ## 2. Tenancy
 
-- Every tenant table has `tenant_id` and RLS enabled (see `db/migrations/0001_core.sql`).
+- Every tenant business table has `tenant_id` and RLS enabled (see `db/migrations/0001_core.sql`); missing `app.tenant_id` means no rows. The identity tables `auth_session` and `invitation` are the only exceptions: they carry `tenant_id` but deliberately have no RLS, the runtime role has no privilege on either, and they are reached only through security-definer auth functions.
 - Runtime transactions set `app.tenant_id`; no setting means no rows.
 - The runtime database role does not own tables and cannot bypass RLS.
 - Cross-tenant foreign keys are prevented with composite `(tenant_id, id)` references.
@@ -139,9 +139,13 @@ Target controls, not built:
 - Encryption in transit (TLS 1.2+) and at rest.
 - Least-privilege infrastructure roles; no long-lived production credentials in CI.
 - Secrets in a managed store with rotation; never in Git.
-- Backups encrypted, tested with scheduled restore drills.
-- Dependency pinning, lockfiles, automated vulnerability scanning and SAST in CI.
-- Annual independent penetration test before general availability; remediation tracked.
+- Backups encrypted, tested with scheduled restore drills. Not built in M0.
+- Repository verification is authored but not yet exercised on GitHub. [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) declares push and pull-request runs on PostgreSQL 16 and 17 with read-only repository permissions, a frozen lockfile, `pnpm secret-scan`, `pnpm audit --prod --audit-level high`, typecheck, lint, boundary lint, bootstrap, migrate twice, seed twice and the test suite. There is no Git remote, so the workflow has never run; PostgreSQL 16 compatibility is unproven.
+- `scripts/secret-scan.ts` scans tracked and untracked non-ignored regular files for private-key blocks, common cloud/token formats, literal session-cookie values and sensitive file paths. It does not scan Git history, ignored files, packed objects or remote state, and it reports matches without printing them. `tests/secret-scan.test.ts` covers the rules, tracked and untracked discovery, ignored and binary skipping, and redaction.
+- `tests/schema-inventory.test.ts` is the executable record of the schema boundary: 66 public tables with `tenant_id`, 64 with RLS, exactly `auth_session` and `invitation` without RLS, no `FORCE RLS`, and the exact runtime table and person-column grants.
+- Dependency pinning, lockfiles and a production dependency audit exist. SAST, container scanning, SBOM generation and action SHA-pinning do not.
+- Annual independent penetration test before general availability; remediation tracked. None has been performed.
+- The draft threat model in [`security/m0-threat-model.md`](security/m0-threat-model.md) and the evidence pack in [`release/m0-evidence.md`](release/m0-evidence.md) record controls, tests, gaps and residual risk. Neither is reviewed or approved; there is no named security owner.
 
 ## 9. Privacy and compliance
 
@@ -165,7 +169,7 @@ Target controls, not built:
 
 Before the first real dataset is imported:
 
-- [ ] Tenant isolation tests pass for every table.
+- [ ] Tenant isolation tests pass for every RLS tenant business table. The two identity exceptions (`auth_session`, `invitation`) are covered by runtime-privilege and auth-function tests, not by RLS.
 - [ ] Entitlement tests pass: no access to an unlicensed, expired or cancelled module; no dependency leak.
 - [ ] Invitation, login, logout and session-expiry paths exercised against a disposable database; MFA, password reset, email delivery and edge rate limiting configured.
 - [ ] Role and scope authorization implemented for every action. M0 role authorization covers People and Work only; scope authorization and employee self-scope remain open. A valid session alone grants no action.

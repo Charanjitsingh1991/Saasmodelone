@@ -14,7 +14,7 @@ The goal is not coverage theatre. It is confidence that payroll is correct, tena
 | Integration | Real Postgres, RLS, transactions, constraints, outbox | Every commit |
 | Entitlement | Module gating, expiry, cancellation, dependency degradation | Every commit |
 | Migration fixture | Source sample → staging → reconciliation → promotion → export | Every commit for fixtures; nightly for large fixtures |
-| End-to-end | Critical user journeys in a browser | Every pull request to main |
+| End-to-end | Critical user journeys in a browser | Not built: no UI, no browser suite and no CI browser job |
 | Security regression | Cross-tenant access, role matrix, export authorization | Every commit |
 | Restore drill | Backup restores within RPO/RTO | Monthly and before a design partner goes live |
 
@@ -26,7 +26,7 @@ No mocks for the database in isolation or migration tests. A mocked tenant filte
 
 ### 2.1 Tenant isolation
 
-For every tenant table:
+For every RLS tenant business table (currently 64; `auth_session` and `invitation` are the two no-RLS identity exceptions and are covered by §2.11 instead):
 
 1. Create tenants A and B with one row each.
 2. Set `app.tenant_id = A`.
@@ -244,23 +244,25 @@ Not covered yet: browser login and invitation screens (none exist), email delive
 
 ## 4. CI gates
 
-A merge is blocked when any of these fail:
+The workflow at [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) is authored to run these gates on push to `main` and on pull requests, against PostgreSQL 16 and 17, with read-only repository permissions, no repository secrets and a frozen lockfile. **There is no Git remote, so it has never run; no merge has been blocked by it, and PostgreSQL 16 is unproven.** Local results are recorded in [`release/m0-evidence.md`](release/m0-evidence.md).
 
-- Type check and lint.
+- Type check, lint and import-boundary lint.
 - Unit, contract and integration tests.
-- Tenant isolation suite.
+- Tenant isolation suite over the RLS tenant business tables, plus the explicit identity-table privilege tests.
+- Schema inventory: 66 tables with `tenant_id`, 64 RLS tables, exactly two no-RLS identity exceptions, no forced RLS, the exact runtime table grants and the eight person column grants.
 - Module entitlement suite, including expiry, cancellation, dependency degradation and catalog write protection.
 - Authentication and session suite: login, invitation acceptance, cookie attributes, session expiry/revocation, CSRF/Origin checks and the auth-role privilege matrix.
 - Authorization matrix: the exact seven-role policy, role denial after entitlement, entitlement-before-role ordering, and `/v1/context` permissions and effective modules.
 - Denied-request audit: one `authorization.denied` row per authenticated access denial, no query/header/token leakage, and a denial still returned when the audit write fails.
 - People directory export: exact streaming CSV, formula-injection guarding, tenant isolation and override attempts, entitlement and role denials with no bytes, soft-delete exclusion, forbidden-field exclusion, pre-disclosure audit, audit-failure 500 and column-level runtime grants.
-- Payroll golden cases for the current and previous rule-pack versions in every covered jurisdiction.
-- Migration fixture → reconciliation → promotion → export.
-- Dependency audit with no unapproved critical vulnerability.
-- Secret scan.
-- Schema migration applies cleanly to an empty database and to the previous version.
+- Migration runner: fresh apply, no-op re-apply and checksum tampering. The workflow also bootstraps, migrates twice and seeds twice before testing.
+- Secret scan over tracked and untracked non-ignored regular files. It does not scan Git history, ignored files, packed objects or remote state, and it cannot prove absence.
+- Production dependency audit at high severity. It is not SAST or supply-chain provenance.
+- Workflow contract test: asserts the triggers, read-only permissions, action allowlist, PostgreSQL versions, localhost-only dummy credentials and exact command order. This proves the file's shape, not that GitHub executed it.
 
-Browser end-to-end tests cover: sign-in, invite, employee onboarding, leave request/approval, payroll draft → finalise, import rehearsal → sign-off, invoice creation, module enablement on an existing tenant, and export. None of these browser tests exist yet; authentication is currently proven at the API and database layers only.
+Not yet in CI: payroll golden cases (no payroll calculation), migration fixture → reconciliation → promotion → export (no Switch promotion), SAST, container scanning, SBOM, action SHA-pinning, branch protection and restore drills. The threat model is a draft and has not been reviewed by a named security owner.
+
+Browser end-to-end tests cover: sign-in, invite, employee onboarding, leave request/approval, payroll draft → finalise, import rehearsal → sign-off, invoice creation, module enablement on an existing tenant, and export. **None of these browser tests exist because there is no web UI**; authentication and the People export are proven at the API and database layers only. There is no Playwright configuration or CI browser job.
 
 ---
 
@@ -287,4 +289,6 @@ For each release that touches payroll, migration or authorization, attach:
 - Isolation and authorization suite result.
 - Known limitations and rollback plan.
 
-A green build is not evidence that a feature works. The evidence is the specific suite above, plus a manual smoke test of the primary journey.
+The M0 interim pack is [`release/m0-evidence.md`](release/m0-evidence.md): source commits, environment, exact commands and results, criterion-by-criterion status and an explicit "not proven — do not claim" section. It records that M0 has not exited.
+
+A green build is not evidence that a feature works. The evidence is the specific suite above, plus a manual smoke test of the primary journey. For M0 the primary UI journey cannot be smoke-tested because no UI exists.
