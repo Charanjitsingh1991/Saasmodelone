@@ -16,7 +16,7 @@ The goal is not coverage theatre. It is confidence that payroll is correct, tena
 | Migration fixture | Source sample → staging → reconciliation → promotion → export | Every commit for fixtures; nightly for large fixtures |
 | End-to-end | Critical user journeys in a browser | One Playwright journey locally against the built shell, disposable PostgreSQL and an in-process API; declared in CI, never executed there |
 | Security regression | Cross-tenant access, role matrix, export authorization | Every commit |
-| Restore drill | Logical dump and restore parity (`pnpm drill:restore`) | Executed manually against the local developer database; the RPO/RTO target below and a monthly schedule are not built |
+| Restore drill | Logical dump and restore parity (`pnpm drill:restore`) | Executed manually against the local developer database; the target RPO of 15 minutes and RTO of 4 hours recorded in [`architecture.md`](architecture.md) and a monthly schedule are not built |
 
 No mocks for the database in isolation or migration tests. A mocked tenant filter has already passed in systems that later leaked.
 
@@ -337,6 +337,6 @@ For each release that touches payroll, migration or authorization, attach:
 - Isolation and authorization suite result.
 - Known limitations and rollback plan.
 
-The M0 interim pack is [`release/m0-evidence.md`](release/m0-evidence.md): source commits, environment, exact commands and results, criterion-by-criterion status and an explicit "not proven — do not claim" section. It records that M0 has not exited.
+The M0 interim pack is [`release/m0-evidence.md`](release/m0-evidence.md): source commits, environment, exact commands and results, criterion-by-criterion status and an explicit "not proven — do not claim" section. It records that M0 has not exited. [`release/m0-exit-audit.md`](release/m0-exit-audit.md) holds the per-criterion verdict with the exact test file and test name behind each claim, what has never run anywhere and the owner decisions that block exit.
 
 A green build is not evidence that a feature works. The evidence is the specific suite above, plus a manual smoke test of the primary journey. For M0 the primary UI journey is the sign-in and empty People path; it is covered by the Playwright journey, including automated overflow checks at 390, 768 and 1440 px. There is still no People data-entry journey to smoke-test.
