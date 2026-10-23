@@ -289,7 +289,7 @@ What this does not prove: no production producer emits events, so end-to-end del
 
 ## 4. CI gates
 
-The workflow at [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) is authored to run these gates on push to `main` and on pull requests, against PostgreSQL 16 and 17, with read-only repository permissions, no repository secrets and a frozen lockfile. **There is no Git remote, so it has never run; no merge has been blocked by it, and PostgreSQL 16 is unproven.** Local results are recorded in [`release/m0-evidence.md`](release/m0-evidence.md).
+The workflow at [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) is authored to run these gates on push to `main` and on pull requests, against PostgreSQL 16 and 17, with read-only repository permissions, no repository secrets and a frozen lockfile. **A private GitHub remote now exists and the push of `f060bca` created Actions run `39903221917`, but no job has ever executed there — GitHub annotated the account as locked for billing and every attempt ended in `startup_failure` with zero jobs — so no step has run, no merge has been blocked by it, and PostgreSQL 16 is unproven.** Local results are recorded in [`release/m0-evidence.md`](release/m0-evidence.md).
 
 - Type check, lint and import-boundary lint.
 - Unit, contract and integration tests.
@@ -310,7 +310,7 @@ The workflow at [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) is 
 
 Not yet in CI: payroll golden cases (no payroll calculation), migration fixture → reconciliation → promotion → export (no Switch promotion), SAST, container scanning, SBOM, action SHA-pinning, branch protection and restore drills. The threat model is a draft and has not been reviewed by a named security owner.
 
-Browser end-to-end coverage today is the single journey in §2.13: sign-in, the empty People screen, effective-module navigation, theme persistence, sign-out and the People access state. Invitation acceptance, employee onboarding, leave request/approval, payroll draft → finalise, import rehearsal → sign-off, invoice creation, module enablement and export have **no browser test and no screen**. There is a Playwright configuration and the CI workflow declares the browser job, but the workflow has never run; the local browser pass is not evidence of CI execution.
+Browser end-to-end coverage today is the single journey in §2.13: sign-in, the empty People screen, effective-module navigation, theme persistence, sign-out and the People access state. Invitation acceptance, employee onboarding, leave request/approval, payroll draft → finalise, import rehearsal → sign-off, invoice creation, module enablement and export have **no browser test and no screen**. There is a Playwright configuration and the CI workflow declares the browser job, but the workflow has never executed a job — the push of `f060bca` created run `39903221917` and every attempt in it ended in `startup_failure` with zero jobs — so the local browser pass is not evidence of CI execution.
 
 ---
 
