@@ -1,4 +1,10 @@
-import type { ContextResponse } from '@saasmodels/contracts';
+import { useEffect, useState, type FormEvent } from 'react';
+import type { ContextResponse, PeopleListResponse } from '@saasmodels/contracts';
+import {
+  PEOPLE_LIST_DEFAULT_PAGE_SIZE,
+  PEOPLE_SEARCH_MAX_LENGTH,
+} from '@saasmodels/contracts';
+import { api } from '../api';
 import {
   accessLabel,
   availableModuleNames,
@@ -79,17 +85,88 @@ type PeopleScreenProps = {
   context: ContextResponse;
 };
 
+type DirectoryState =
+  | { phase: 'loading' }
+  | { phase: 'error'; message: string }
+  | { phase: 'ready'; data: PeopleListResponse };
+
+const DIRECTORY_ERROR_MESSAGE =
+  'The directory could not be loaded. Try again.';
+
+function directoryCount(total: number): string {
+  return `${total} ${total === 1 ? 'person' : 'people'}`;
+}
+
+// The live region must not announce a load that already failed, so its copy
+// follows the phase rather than the presence of data.
+function directoryStatusCopy(state: DirectoryState): string {
+  if (state.phase === 'error') {
+    return 'Directory unavailable';
+  }
+  if (state.phase === 'ready') {
+    return directoryCount(state.data.total);
+  }
+  return 'Loading the directory…';
+}
+
 export function PeopleScreen({ context }: PeopleScreenProps) {
   const people = findModule(context, 'people');
+  const [draft, setDraft] = useState('');
+  const [term, setTerm] = useState('');
+  const [page, setPage] = useState(1);
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState<DirectoryState>({ phase: 'loading' });
+
+  useEffect(() => {
+    // A response is dropped once the search or page has moved on, so a slow
+    // first request cannot overwrite the results of a newer one.
+    let stale = false;
+
+    async function load() {
+      setState({ phase: 'loading' });
+      const result = await api.people({
+        q: term,
+        page,
+        pageSize: PEOPLE_LIST_DEFAULT_PAGE_SIZE,
+      });
+      if (stale) {
+        return;
+      }
+      if (!result.ok) {
+        // A 401 is handled by the global listener, which returns the app to
+        // sign-in without leaving any directory state behind.
+        if (result.status !== 401) {
+          setState({ phase: 'error', message: DIRECTORY_ERROR_MESSAGE });
+        }
+        return;
+      }
+      setState({ phase: 'ready', data: result.data });
+    }
+
+    void load();
+    return () => {
+      stale = true;
+    };
+  }, [term, page, attempt]);
+
+  const data = state.phase === 'ready' ? state.data : null;
+  const totalPages =
+    data === null ? 1 : Math.max(1, Math.ceil(data.total / data.pageSize));
+
+  function submitSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setTerm(draft.trim());
+    setPage(1);
+  }
 
   return (
     <article className="page page--people">
       <header className="page-head page-head--split">
         <div>
           <p className="eyebrow">Directory</p>
-          <h1>People</h1>
+          <h1 id="people-title">People</h1>
           <p className="page-lede">
-            The shared directory for everyone in this workspace.
+            The shared directory for this workspace.
           </p>
         </div>
         {people ? (
@@ -97,18 +174,101 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
         ) : null}
       </header>
 
-      <section className="empty-state" aria-labelledby="people-empty-title">
-        <div className="empty-orbit" aria-hidden="true">
-          <span />
+      <section className="directory" aria-labelledby="people-title">
+        <div className="directory-toolbar">
+          <form className="search-form" role="search" onSubmit={submitSearch}>
+            <label htmlFor="people-search">Search people</label>
+            <input
+              id="people-search"
+              className="searchbox"
+              type="search"
+              placeholder="Name, code or work email"
+              value={draft}
+              maxLength={PEOPLE_SEARCH_MAX_LENGTH}
+              onChange={(event) => setDraft(event.target.value)}
+            />
+            <button className="button button--quiet" type="submit">
+              Search
+            </button>
+          </form>
+          <p className="directory-count" role="status" aria-live="polite">
+            {directoryStatusCopy(state)}
+          </p>
         </div>
-        <h2 id="people-empty-title">The directory is enabled.</h2>
-        <p>
-          People is part of this workspace. Employee records will appear here
-          when directory data entry ships.
-        </p>
-        <p className="fine-print">
-          This milestone includes the signed-in shell only. This screen has no
-          data entry, import or export.
+
+        {state.phase === 'error' ? (
+          <div className="directory-state">
+            <p className="directory-error" role="alert">
+              {state.message}
+            </p>
+            <button
+              className="button button--quiet"
+              type="button"
+              onClick={() => setAttempt((current) => current + 1)}
+            >
+              Try again
+            </button>
+          </div>
+        ) : data !== null && data.items.length > 0 ? (
+          <div className="directory-scroll">
+            <table className="directory-table" aria-label="People directory">
+              <thead>
+                <tr>
+                  <th scope="col">Name</th>
+                  <th scope="col">Employee code</th>
+                  <th scope="col">Work email</th>
+                  <th scope="col">Phone</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.items.map((person) => (
+                  <tr key={person.id}>
+                    <th scope="row">{person.displayName}</th>
+                    <td>{person.employeeCode ?? '—'}</td>
+                    <td>{person.workEmail ?? '—'}</td>
+                    <td>{person.phone ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : data !== null ? (
+          <p className="directory-empty">
+            {term === ''
+              ? 'No people are visible in this view.'
+              : `No people match “${term}” in this view.`}
+          </p>
+        ) : null}
+
+        {data !== null && data.total > 0 ? (
+          <nav className="pager" aria-label="Directory pages">
+            <button
+              className="button button--quiet button--small"
+              type="button"
+              disabled={page <= 1}
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+            >
+              Previous
+            </button>
+            <span className="pager-status">
+              Page {page} of {totalPages}
+            </span>
+            <button
+              className="button button--quiet button--small"
+              type="button"
+              disabled={page >= totalPages}
+              onClick={() =>
+                setPage((current) => Math.min(totalPages, current + 1))
+              }
+            >
+              Next
+            </button>
+          </nav>
+        ) : null}
+
+        <p className="fine-print directory-note">
+          This view lists only the people your role and scope cover, so it can
+          show fewer records than the workspace holds.
         </p>
       </section>
     </article>

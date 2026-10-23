@@ -1,9 +1,19 @@
-import type { ContextResponse, SessionResponse } from '@saasmodels/contracts';
+import type {
+  ContextResponse,
+  PeopleListResponse,
+  SessionResponse,
+} from '@saasmodels/contracts';
 
 export type LoginInput = {
   tenantSlug: string;
   email: string;
   password: string;
+};
+
+export type PeopleListInput = {
+  q?: string;
+  page?: number;
+  pageSize?: number;
 };
 
 export type ApiResult<T> =
@@ -76,6 +86,24 @@ export const api = {
   session: () => request<SessionResponse>('/v1/auth/session'),
 
   context: () => request<ContextResponse>('/v1/context'),
+
+  people: (input: PeopleListInput = {}) => {
+    const params = new URLSearchParams();
+    const term = input.q?.trim();
+    if (term) {
+      params.set('q', term);
+    }
+    if (input.page !== undefined) {
+      params.set('page', String(input.page));
+    }
+    if (input.pageSize !== undefined) {
+      params.set('pageSize', String(input.pageSize));
+    }
+    const query = params.toString();
+    return request<PeopleListResponse>(
+      query === '' ? '/v1/people' : `/v1/people?${query}`,
+    );
+  },
 
   login: (input: LoginInput) =>
     request<SessionResponse>('/v1/auth/login', {

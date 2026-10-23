@@ -111,7 +111,7 @@ test.afterAll(async () => {
   await database?.drop();
 });
 
-test('signs in through the built shell, gates People and persists only the theme', async ({
+test('signs in, renders and searches the directory, gates People and persists only the theme', async ({
   page,
 }) => {
   const people = requireAccount(peopleAccount, 'People');
@@ -138,7 +138,7 @@ test('signs in through the built shell, gates People and persists only the theme
     'Email, password or workspace is incorrect.',
   );
 
-  // A valid login reaches the empty People screen.
+  // A valid login reaches the scope-narrowed directory.
   await page.locator('#password').fill(syntheticPassword);
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page).toHaveURL(/\/app\/people$/);
@@ -146,7 +146,42 @@ test('signs in through the built shell, gates People and persists only the theme
     page.getByRole('heading', { name: 'People', exact: true }),
   ).toBeVisible();
   await expect(page.locator('.page-head .badge')).toHaveText('Read and write');
-  await expect(page.getByText('The directory is enabled.')).toBeVisible();
+
+  const directory = page.getByRole('table', { name: 'People directory' });
+  const liveCount = page.getByRole('status');
+  await expect(liveCount).toHaveAttribute('aria-live', 'polite');
+  await expect(liveCount).toHaveText('4 people');
+  await expect(directory.getByRole('rowheader')).toHaveCount(4);
+  await expect(
+    directory.getByRole('rowheader', { name: 'Ada, "Countess"', exact: true }),
+  ).toBeVisible();
+  await expect(
+    directory.getByRole('cell', { name: 'EXP-001', exact: true }),
+  ).toBeVisible();
+  await expect(
+    directory.getByRole('rowheader', { name: 'Soft Deleted Person' }),
+  ).toHaveCount(0);
+  await expect(
+    directory.getByRole('columnheader', { name: 'Work email' }),
+  ).toBeVisible();
+
+  await expect(
+    page.getByRole('navigation', { name: 'Directory pages' }),
+  ).toContainText('Page 1 of 1');
+  await expect(page.getByRole('button', { name: 'Previous' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Next' })).toBeDisabled();
+
+  const search = page.getByRole('searchbox', { name: 'Search people' });
+  await search.fill('Grace');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(liveCount).toHaveText('1 person');
+  await expect(directory.getByRole('rowheader')).toHaveCount(1);
+
+  await search.fill('');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(liveCount).toHaveText('4 people');
+  await expect(directory.getByRole('rowheader')).toHaveCount(4);
+  expect(page.url()).not.toContain('Grace');
 
   const nav = page.getByRole('navigation', { name: 'Modules' });
   await expect(nav.getByRole('link', { name: /People/ })).toHaveAttribute(
@@ -180,6 +215,7 @@ test('signs in through the built shell, gates People and persists only the theme
   await expect(
     page.getByRole('heading', { name: 'People', exact: true }),
   ).toBeVisible();
+  await expect(liveCount).toHaveText('4 people');
   expect(await page.evaluate(() => Object.keys(localStorage))).toEqual([
     'saasmodels.theme',
   ]);
@@ -233,7 +269,9 @@ test('signs in through the built shell, gates People and persists only the theme
     page.getByRole('heading', { name: 'People is not available to you' }),
   ).toBeVisible();
   await expect(page.locator('.module-chips').getByText('Work')).toBeVisible();
-  await expect(page.getByText('The directory is enabled.')).toHaveCount(0);
+  await expect(directory).toHaveCount(0);
+  await expect(search).toHaveCount(0);
+  await expect(liveCount).toHaveCount(0);
   await expect(
     page.getByRole('heading', { name: 'People', exact: true }),
   ).toHaveCount(0);

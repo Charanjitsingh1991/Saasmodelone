@@ -770,59 +770,173 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
   text-decoration-thickness: 2px;
 }
 
-/* People */
+/* People directory */
 
-.empty-state {
-  max-width: 720px;
-  margin-top: clamp(46px, 8vw, 92px);
-  padding-top: clamp(36px, 6vw, 64px);
+.directory {
+  margin-top: clamp(38px, 6vw, 64px);
   border-top: 1px solid var(--line);
 }
 
-.empty-orbit {
-  position: relative;
-  display: grid;
-  place-items: center;
-  width: 92px;
-  height: 92px;
-  margin-bottom: 30px;
+.directory-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px 24px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.search-form {
+  display: flex;
+  flex: 1 1 420px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.search-form label {
+  flex: none;
+  font-size: 0.82rem;
+  font-weight: 640;
+  letter-spacing: 0.01em;
+}
+
+.searchbox {
+  flex: 1 1 220px;
+  min-width: 0;
+  height: 44px;
+  padding: 0 13px;
   border: 1px solid var(--line-strong);
-  border-radius: 50%;
+  border-radius: 12px;
+  background: var(--paper);
+  color: var(--ink);
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
 }
 
-.empty-orbit::before {
-  content: '';
-  position: absolute;
-  inset: 11px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 50%;
+.searchbox::placeholder {
+  color: var(--ink-faint);
+  opacity: 1;
 }
 
-.empty-orbit span {
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 10px rgba(200, 242, 84, 0.14);
+.searchbox:hover {
+  border-color: var(--ink-faint);
 }
 
-.empty-state h2 {
-  margin: 0 0 12px;
-  font-size: clamp(1.45rem, 2.1vw, 1.9rem);
-  font-weight: 630;
-  letter-spacing: -0.03em;
+.searchbox:focus {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px var(--violet-soft);
+  outline: none;
 }
 
-.empty-state p {
+.search-form .button {
+  flex: none;
+  min-height: 44px;
+}
+
+.directory-count {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.directory-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.directory-table {
+  width: 100%;
+  min-width: 640px;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+.directory-table th,
+.directory-table td {
+  padding: 15px 18px 15px 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+.directory-table thead th {
+  padding-top: 20px;
+  padding-bottom: 12px;
+  color: var(--ink-faint);
+  font-size: 0.7rem;
+  font-weight: 680;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.directory-table tbody th {
+  color: var(--ink);
+  font-weight: 620;
+  letter-spacing: -0.01em;
+}
+
+.directory-table td {
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+.directory-table tbody tr:last-child th,
+.directory-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.directory-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 34px 0 10px;
+}
+
+.directory-error {
+  max-width: 52ch;
+  margin: 0;
+  color: var(--danger);
+  line-height: 1.6;
+}
+
+.directory-empty {
   max-width: 54ch;
-  margin: 0 0 10px;
+  margin: 0;
+  padding: 34px 0 10px;
   color: var(--ink-soft);
   line-height: 1.65;
 }
 
-.empty-state .fine-print {
-  margin-top: 24px;
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 0 4px;
+  border-top: 1px solid var(--line);
+}
+
+.pager-status {
   color: var(--ink-faint);
+  font-size: 0.76rem;
+  font-weight: 640;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.directory-note {
+  max-width: 64ch;
+  margin-top: 18px;
+  line-height: 1.6;
 }
 
 .panel-state {
@@ -1017,6 +1131,25 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
 
   .module-note {
     max-width: 40ch;
+  }
+
+  .directory-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .search-form {
+    flex: 0 1 auto;
+    gap: 8px;
+  }
+
+  .search-form label {
+    flex: 1 0 100%;
+  }
+
+  .searchbox {
+    flex: 1 1 auto;
   }
 
   .panel-state .text-link {

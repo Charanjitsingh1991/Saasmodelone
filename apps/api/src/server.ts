@@ -4,8 +4,13 @@ import {
   hasPermission,
   permissionFor,
   permissionsForRole,
+  PEOPLE_LIST_DEFAULT_PAGE_SIZE,
+  PEOPLE_LIST_MAX_PAGE_SIZE,
+  PEOPLE_SEARCH_MAX_LENGTH,
   type ContextModule,
   type ContextResponse,
+  type PeopleListItem,
+  type PeopleListResponse,
   type SessionResponse,
 } from '@saasmodels/contracts';
 import Fastify, {
@@ -77,6 +82,16 @@ export type CreateServerOptions = {
 
 type PersonExportRow = {
   person_id: string;
+  employee_code: string | null;
+  first_name: string;
+  last_name: string | null;
+  display_name: string;
+  work_email: string | null;
+  phone: string | null;
+};
+
+type PeopleListRow = {
+  id: string;
   employee_code: string | null;
   first_name: string;
   last_name: string | null;
@@ -203,6 +218,59 @@ function secretsEqual(left: string, right: string): boolean {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+// The last page a caller may ask for. Anything larger, or a value that is not
+// a plain non-negative integer, is a client error rather than a database error.
+const PEOPLE_MAX_PAGE = 1_000_000;
+
+function peopleQueryStringParam(
+  query: Record<string, unknown>,
+  name: string,
+): string | null {
+  const value = query[name];
+  if (value === undefined) {
+    return null;
+  }
+  // A repeated parameter arrives as an array: the caller has sent two answers
+  // for one filter, so there is no safe way to honour it.
+  if (typeof value !== 'string') {
+    throw new ApiError(400, 'INVALID_QUERY');
+  }
+  return value;
+}
+
+function peopleSearchTerm(query: Record<string, unknown>): string {
+  const raw = peopleQueryStringParam(query, 'q');
+  if (raw === null) {
+    return '';
+  }
+  const term = raw.trim();
+  if (term.length > PEOPLE_SEARCH_MAX_LENGTH) {
+    throw new ApiError(400, 'INVALID_QUERY');
+  }
+  return term;
+}
+
+function peopleIntegerParam(
+  query: Record<string, unknown>,
+  name: string,
+  fallback: number,
+  max: number,
+): number {
+  const raw = peopleQueryStringParam(query, name);
+  if (raw === null) {
+    return fallback;
+  }
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new ApiError(400, 'INVALID_QUERY');
+  }
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value) || value < 1 || value > max) {
+    throw new ApiError(400, 'INVALID_QUERY');
+  }
+  return value;
 }
 
 function validateExportBatchSize(value: number): number {
@@ -373,13 +441,15 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
     }
   });
 
-  // Auth and context responses carry credentials, session or authorization
-  // state and must never be cached by a browser, proxy or shared cache,
-  // including error responses.
+  // Auth, context and directory responses carry credentials, session,
+  // authorization or tenant data and must never be cached by a browser, proxy
+  // or shared cache, including error responses.
   app.addHook('onSend', async (request, reply) => {
     if (
       request.url.startsWith('/v1/auth/') ||
-      request.url.startsWith('/v1/context')
+      request.url.startsWith('/v1/context') ||
+      request.url === '/v1/people' ||
+      request.url.startsWith('/v1/people?')
     ) {
       reply.header('cache-control', 'no-store');
     }
@@ -516,6 +586,93 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
             permissions: permissionsForRole(member.role),
             switchAccess: switchAccess.rows[0]?.allowed ?? false,
             modules: effective,
+          };
+          return body;
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  app.get('/v1/people', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+
+    const query = request.query as Record<string, unknown>;
+    const searchTerm = peopleSearchTerm(query);
+    const page = peopleIntegerParam(query, 'page', 1, PEOPLE_MAX_PAGE);
+    const pageSize = peopleIntegerParam(
+      query,
+      'pageSize',
+      PEOPLE_LIST_DEFAULT_PAGE_SIZE,
+      PEOPLE_LIST_MAX_PAGE_SIZE,
+    );
+
+    try {
+      // The transaction sets both app.tenant_id and app.user_id, so the
+      // restrictive scope policies narrow this read. No scope predicate is
+      // re-implemented here.
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'people', operation: 'read' },
+        },
+        async (client) => {
+          const clauses = ['deleted_at is null'];
+          const filterValues: string[] = [];
+          if (searchTerm !== '') {
+            filterValues.push(searchTerm);
+            const needle = `$${filterValues.length}`;
+            // strpos over the lowered columns is a literal match, so a search
+            // for "%" or "_" cannot behave like a LIKE wildcard.
+            clauses.push(
+              `(strpos(lower(display_name), lower(${needle})) > 0
+                 or strpos(lower(coalesce(employee_code, '')), lower(${needle})) > 0
+                 or strpos(lower(coalesce(work_email::text, '')), lower(${needle})) > 0)`,
+            );
+          }
+          const where = clauses.join(' and ');
+          const limitIndex = filterValues.length + 1;
+
+          const matching = await client.query<{ total: string }>(
+            `select count(*) as total from person where ${where}`,
+            filterValues,
+          );
+          const pageRows = await client.query<PeopleListRow>(
+            `select id,
+                    employee_code,
+                    first_name,
+                    last_name,
+                    display_name,
+                    work_email::text as work_email,
+                    phone
+               from person
+              where ${where}
+              order by lower(display_name), id
+              limit $${limitIndex} offset $${limitIndex + 1}`,
+            [...filterValues, pageSize, (page - 1) * pageSize],
+          );
+
+          const items: PeopleListItem[] = pageRows.rows.map((row) => ({
+            id: row.id,
+            employeeCode: row.employee_code,
+            firstName: row.first_name,
+            lastName: row.last_name,
+            displayName: row.display_name,
+            workEmail: row.work_email,
+            phone: row.phone,
+          }));
+
+          const body: PeopleListResponse = {
+            items,
+            total: Number(matching.rows[0]?.total ?? '0'),
+            page,
+            pageSize,
           };
           return body;
         },

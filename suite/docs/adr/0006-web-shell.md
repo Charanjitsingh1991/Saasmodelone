@@ -50,13 +50,18 @@ to prove the M0 exit criterion.
 6. **The browser journey is part of the definition of done.** One Playwright
    test runs against the built web output, a disposable PostgreSQL database and
    the API in-process on localhost. Synthetic accounts exercise sign-in, the
-   People empty state, module filtering, theme persistence and sign-out. It does
+   People screen's data (empty state in M0, the directory rows and their search
+   from M1), module filtering, theme persistence and sign-out. It does
    not mock the API, session or database.
 
 ## Consequences
 
 - The M0 People screen is deliberately an empty state. It has no data entry,
   import, export, invitation or CRUD, and it makes no directory request.
+- M1 note: that empty state has since been replaced — `/app/people` now renders
+  the read-only `GET /v1/people` directory with search, a live result count and
+  paging, still with no write path and no scope label, and every decision above
+  still holds.
 - The client bundle is small enough to reason about but not split by route yet;
   code splitting can be introduced when module screens exist.
 - Same-origin deployment means cookies use `SameSite=Strict` without CORS

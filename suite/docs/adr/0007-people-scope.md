@@ -1,6 +1,6 @@
 # ADR 0007 — People scope is a database property on top of role
 
-Status: accepted · October 2026 · database half only (M1 slice 1)
+Status: accepted · October 2026 · database half (M1 slice 1), owner-only authoring path (slice 2) and first request-layer consumer (slice 3)
 
 ## Context
 
@@ -89,8 +89,9 @@ database.
    deliberate and it is a documented residual, not an oversight: Postgres cannot
    distinguish an unset GUC from an empty one more cheaply than this, and the
    alternative would break every system path that legitimately spans a tenant.
-   The People directory export is not one of those paths: it runs through
-   `withMemberTransaction`, so it is narrowed like any other member request.
+   The People directory export and the `GET /v1/people` read route are not among
+   those paths: both run through `withMemberTransaction`, so both are narrowed like
+   any other member request.
    `tests/scope.test.ts` pins it, so any change to that behaviour is a visible
    test failure rather than a quiet widening.
 10. **Project and client scope are deferred, with no dead schema.** The `CHECK`
@@ -111,8 +112,7 @@ database.
 
 ## Consequences
 
-- **This slice is the database half.** There is no API route, no web screen and
-  no contract change: `permissionsForRole` is untouched and `withMemberTransaction`
+- **The database decides, the caller does not.** `permissionsForRole` is untouched and `withMemberTransaction`
   still checks membership → platform → entitlement → role and knows nothing about
   scope rows. The scope decision happens underneath that check, in the policies,
   on any transaction that set `app.user_id` — which `withMemberTransaction`
@@ -120,6 +120,31 @@ database.
   export, are already subject to scope; they change behaviour only for a
   membership that has a `membership_scope` row, and none can be written through
   the product yet.
+- **Slice 3 adds the first request-layer consumer, and it adds no scope code.**
+  `GET /v1/people` and the People directory screen are the first member path built
+  to be narrowed by these policies rather than merely being subject to them. The
+  route opens a People-read member transaction, selects only the granted directory
+  columns with `deleted_at is null`, and contains no scope predicate in SQL or
+  TypeScript; `tests/people.test.ts` pins the regression where a manager scoped to
+  one legal entity reads exactly one row through the route while the tenant owner
+  reads the whole tenant in the same run — which is the proof that the transaction
+  really does set `app.user_id`. The `count(*)` behind `total` runs under the same
+  policies in the same transaction, so a scoped member's total is their total, not
+  the tenant's.
+- **Scope is enforced, never displayed.** `/v1/context` is unchanged and still
+  returns entitlements, the resolved role and its canonical permissions only, so no
+  client can tell a tenant-wide member from a scoped one. The directory screen
+  therefore prints no scope label: it has no way to know what narrowed its rows,
+  and inventing one would be a guess. Its fine print says only that the view is
+  limited by the member's role and scope, and its empty copy never claims the
+  workspace holds nobody.
+- **The employee self-read is still unreachable, and so is any write.** The
+  `employee` permission set in `@saasmodels/contracts` is unchanged by all three
+  slices, so an employee request still denies at `ROLE_DENIED` before a policy is
+  consulted and `app.person_visible` has no caller for that role. `saas_runtime`
+  still holds no `INSERT`, `UPDATE` or `DELETE` on `person` and there is no People
+  write route, so the write-side policies stay exercised by the database tests
+  rather than by the product.
 - **Role-first ordering is preserved and observable.** An unentitled module or a
   role without the permission is refused before scope matters, so scope cannot
   disclose that a module exists or what a role could have seen. The test suite
@@ -169,5 +194,6 @@ database.
   runtime-executable `app` functions. The `saas_worker` surface is unchanged at
   zero table privileges and exactly eight executable functions. The owner-only
   scope administration slice adds no migration, no policy, no grant and no
-  function to either surface, so all of these figures are unchanged by it and
+  function to either surface, and neither does the read-only directory route and
+  the screen that consume it, so all of these figures are unchanged by both and
   were re-derived from the live database to confirm that.
