@@ -32,6 +32,7 @@ let newestFile: string | undefined;
 let upgrade: MigrationResult | undefined;
 let before: Snapshot | undefined;
 let after: Snapshot | undefined;
+let preUpgradeIds: { tenantA: string; userId: string } | undefined;
 
 function db(): TestDatabase {
   if (!database) {
@@ -117,8 +118,9 @@ async function snapshot(client: Client): Promise<Snapshot> {
 // Representative rows for every table 0011 touches or must preserve. The event
 // set spans the pre-upgrade outcomes: never attempted, retried with an error,
 // already published, and a second tenant's row.
-async function insertPreUpgradeRows(client: Client): Promise<void> {
+async function insertPreUpgradeRows(client: Client): Promise<{ tenantA: string; userId: string }> {
   const tenantIds: string[] = [];
+
   for (const slug of ['roll_a', 'roll_b']) {
     const inserted = await client.query<{ id: string }>(
       `insert into tenant (name, slug, data_region, status, deleted_at, is_internal)
@@ -227,6 +229,12 @@ async function insertPreUpgradeRows(client: Client): Promise<void> {
       ],
     );
   }
+
+  const tenantA = tenantIds[0];
+  if (!tenantA) {
+    throw new Error('Could not record the first roll-forward tenant');
+  }
+  return { tenantA, userId };
 }
 
 beforeAll(async () => {
@@ -251,7 +259,16 @@ beforeAll(async () => {
   database = await createTestDatabase({ migrate: false, namePrefix: 'saasmodels_roll' });
 
   try {
-    const initial = await migrate({ ownerUrl: db().ownerUrl, migrationsDir: previousDir });
+    // The runtime grant allowlist describes the current schema, so it names the
+    // 0012 helpers that a truncated migration set has not created yet. The
+    // synthetic pre-upgrade database is therefore built without it; the real
+    // upgrade below re-applies both grant files and every grant assertion in
+    // this suite runs against the upgraded database.
+    const initial = await migrate({
+      ownerUrl: db().ownerUrl,
+      migrationsDir: previousDir,
+      grantsFiles: [],
+    });
     if (initial.applied.length !== previousFiles.length) {
       throw new Error(`Previous-version apply expected ${previousFiles.length} files, got ${initial.applied.length}`);
     }
@@ -260,7 +277,7 @@ beforeAll(async () => {
 
     const writer = await ownerClient();
     try {
-      await insertPreUpgradeRows(writer);
+      preUpgradeIds = await insertPreUpgradeRows(writer);
       before = await snapshot(writer);
     } finally {
       await writer.end();
@@ -294,9 +311,10 @@ afterAll(async () => {
 
 describe('migration roll-forward over populated data', () => {
   test('applies only the newest file while the earlier ones are skipped by checksum', () => {
-    expect(allFiles).toHaveLength(11);
-    expect(newestFile).toBe('0011_outbox.sql');
-    expect(previousFiles).toHaveLength(10);
+    expect(allFiles).toHaveLength(12);
+    expect(newestFile).toBe('0012_people_scope.sql');
+    expect(previousFiles).toHaveLength(11);
+    expect(previousFiles).toContain('0011_outbox.sql');
     expect(upgraded().applied).toEqual([newestFile]);
     expect(upgraded().skipped).toEqual(previousFiles);
   });
@@ -341,7 +359,7 @@ describe('migration roll-forward over populated data', () => {
     expect(after.events).toEqual(before.events);
   });
 
-  test('gives every pre-upgrade domain event the documented 0011 lease defaults', async () => {
+  test('carries the 0011 lease defaults of every domain event through the 0012 upgrade', async () => {
     if (!after) {
       throw new Error('The post-upgrade snapshot was not captured');
     }
@@ -372,11 +390,13 @@ describe('migration roll-forward over populated data', () => {
         expect(row.next_attempt_at).toBeInstanceOf(Date);
       }
 
-      // attempts is carried through the upgrade, not reset by the new column.
+      // attempts survives the upgrade untouched, and the rows already carried
+      // the 0011 lease columns when 0012 ran: this test shows 0012 preserves
+      // them. The 0011 lease behaviour itself is covered by tests/outbox.test.ts.
       expect(rows.rows.map((row) => row.attempts)).toEqual([1, 0, 2, 3]);
 
-      // 0011 backfills nothing, so an event published before the upgrade keeps
-      // its published_at but is reported as pending by the new status column.
+      // An event inserted with published_at before the 0012 upgrade keeps its
+      // published_at and its 0011 'pending' status: 0012 changes neither.
       expect(after.events.find((row) => row.type === 'roll.published')?.published_at).toBeInstanceOf(
         Date,
       );
@@ -492,6 +512,129 @@ describe('migration roll-forward over populated data', () => {
         worker_table_privileges: false,
         runtime_outbox: false,
       });
+    } finally {
+      await client.end();
+    }
+  });
+
+  // The 0011 database above is populated before 0012 runs, so these four tests
+  // are the consequences of the people-scope upgrade on data that already
+  // exists: the new link starts empty, the new table starts empty, the scope
+  // surface is installed, and a tenant-wide member still reads the directory
+  // exactly as it did under M0.
+  test('leaves every pre-upgrade person unlinked by user_id', async () => {
+    const client = await ownerClient();
+    try {
+      const rows = await client.query<{ user_id: string | null; total: string }>(
+        `select user_id, count(*) over () as total from person order by employee_code`,
+      );
+      expect(rows.rows).toHaveLength(1);
+      expect(rows.rows[0]?.user_id).toBeNull();
+      expect(after?.people).toHaveLength(1);
+    } finally {
+      await client.end();
+    }
+  });
+
+  test('creates membership_scope with no rows on the upgraded database', async () => {
+    const client = await ownerClient();
+    try {
+      const scope = await client.query<{ rows: string; rls: boolean; forced: boolean }>(
+        `select (select count(*)::text from public.membership_scope) as rows,
+                c.relrowsecurity as rls,
+                c.relforcerowsecurity as forced
+           from pg_class c
+           join pg_namespace n on n.oid = c.relnamespace
+          where n.nspname = 'public' and c.relname = 'membership_scope'`,
+      );
+      expect(scope.rows).toEqual([{ rows: '0', rls: true, forced: false }]);
+    } finally {
+      await client.end();
+    }
+  });
+
+  test('keeps a pre-upgrade person readable by a tenant-wide member and by a system context', async () => {
+    if (!preUpgradeIds) {
+      throw new Error('The pre-upgrade fixture ids were not recorded');
+    }
+    const { tenantA, userId } = preUpgradeIds;
+    const read = async (memberId: string | null): Promise<number> => {
+      const client = new Client({ connectionString: db().runtimeUrl });
+      await client.connect();
+      try {
+        await client.query('begin');
+        await client.query("select set_config('app.tenant_id', $1, true)", [tenantA]);
+        if (memberId) {
+          await client.query("select set_config('app.user_id', $1, true)", [memberId]);
+        }
+        const result = await client.query(
+          `select id from public.person where employee_code = 'ROLL-001'`,
+        );
+        await client.query('rollback');
+        return result.rowCount ?? 0;
+      } finally {
+        await client.end();
+      }
+    };
+
+    // The pre-upgrade owner membership has no scope row, so it stays
+    // tenant-wide: the person it could read under M0 it can still read.
+    expect(await read(userId)).toBe(1);
+    // The documented fail-open for a tenant-only system path is unchanged.
+    expect(await read(null)).toBe(1);
+    // A user with no membership in this tenant reads nothing.
+    expect(await read(deterministicUuid('rollforward_absent_user'))).toBe(0);
+  });
+
+  test('installs the scope helpers and the eight restrictive policies on the upgraded database', async () => {
+    const client = await ownerClient();
+    try {
+      const functions = await client.query<{ proname: string; owner: string; config: string[] }>(
+        `select p.proname, pg_get_userbyid(p.proowner) as owner, p.proconfig as config
+           from pg_proc p
+           join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = 'app'
+            and p.proname in ('person_visible', 'person_in_scope',
+                              'person_placement_in_scope', 'current_person_id',
+                              'current_user_id')
+          order by p.proname`,
+      );
+      expect(functions.rows.map((row) => row.proname)).toEqual([
+        'current_person_id',
+        'current_user_id',
+        'person_in_scope',
+        'person_placement_in_scope',
+        'person_visible',
+      ]);
+      for (const row of functions.rows) {
+        expect(row.owner).toBe(OWNER_ROLE);
+        expect(row.config).toContain('search_path=""');
+      }
+
+      const privileges = await client.query<{ runtime: boolean; worker: boolean }>(
+        `select has_function_privilege('saas_runtime', 'app.person_visible(uuid)', 'EXECUTE') as runtime,
+                has_function_privilege('saas_worker', 'app.person_visible(uuid)', 'EXECUTE') as worker`,
+      );
+      expect(privileges.rows[0]).toEqual({ runtime: true, worker: false });
+
+      const policies = await client.query<{ table_name: string; polname: string; permissive: boolean }>(
+        `select c.relname as table_name, p.polname, p.polpermissive as permissive
+           from pg_policy p
+           join pg_class c on c.oid = p.polrelid
+          where c.relname in ('person', 'employment') and p.polname like 'scope_%'
+          order by c.relname, p.polname`,
+      );
+      expect(policies.rows).toHaveLength(8);
+      expect(policies.rows.every((row) => row.permissive === false)).toBe(true);
+
+      // The pre-existing person read still works for the owner path, which is
+      // what the snapshot above proved: nothing was dropped or weakened.
+      const survivors = await client.query(
+        `select 1 from pg_policy p
+           join pg_class c on c.oid = p.polrelid
+          where c.relname = 'person' and p.polname = 'tenant_isolation'`,
+      );
+      expect(survivors.rows).toHaveLength(1);
     } finally {
       await client.end();
     }

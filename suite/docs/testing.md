@@ -15,7 +15,7 @@ The goal is not coverage theatre. It is confidence that payroll is correct, tena
 | Entitlement | Module gating, expiry, cancellation, dependency degradation | Every commit |
 | Migration fixture | Source sample → staging → reconciliation → promotion → export | Every commit for fixtures; nightly for large fixtures |
 | End-to-end | Critical user journeys in a browser | One Playwright journey locally against the built shell, disposable PostgreSQL and an in-process API; declared in CI, never executed there |
-| Security regression | Cross-tenant access, role matrix, export authorization | Every commit |
+| Security regression | Cross-tenant access, role matrix, scope narrowing, export authorization | Every commit |
 | Restore drill | Logical dump and restore parity (`pnpm drill:restore`) | Executed manually against the local developer database; the target RPO of 15 minutes and RTO of 4 hours recorded in [`architecture.md`](architecture.md) and a monthly schedule are not built |
 
 No mocks for the database in isolation or migration tests. A mocked tenant filter has already passed in systems that later leaked.
@@ -26,7 +26,7 @@ No mocks for the database in isolation or migration tests. A mocked tenant filte
 
 ### 2.1 Tenant isolation
 
-For every RLS tenant business table (currently 64; `auth_session` and `invitation` are the two no-RLS identity exceptions and are covered by §2.11 instead):
+For every RLS tenant business table (currently 65; `auth_session` and `invitation` are the two no-RLS identity exceptions and are covered by §2.11 instead):
 
 1. Create tenants A and B with one row each.
 2. Set `app.tenant_id = A`.
@@ -72,7 +72,7 @@ Implemented in M0 for People and Work, against the real database:
 - `/v1/context` returns the role's permissions independently of licensing, and only the effective modules where the database entitlement and the role permission both allow the operation.
 - An ungated member transaction still resolves and returns the role; every route that touches module data must pass a gate.
 
-Target matrix per role × scope × action, not built:
+Target matrix per role × scope × action. 0012 put legal entity, org-unit-subtree and employee self-scope in the database and they are tested in §2.16; the per-role behaviour below is still target state, because no route asks for a scope and the `employee` permission set is unchanged:
 
 - Employee: own profile, own payslips, own leave; no salary visibility for others.
 - Manager: team leave/timesheets; no bank or statutory identifiers.
@@ -143,7 +143,7 @@ The API and worker share one tenant transaction helper, and the same suites prov
 - The principal comes only from a valid `saas_session` cookie resolved server-side. Missing, malformed, expired, revoked or tampered cookies fail with 401 before data is read. No header, query string, body or other cookie can supply a tenant; `x-tenant-id` and a `tenant_id` parameter are ignored.
 - Request routes resolve an active membership before platform access. A non-member or suspended member receives `MEMBERSHIP_DENIED` even when the tenant is suspended, so tenant state is not disclosed. A member of a suspended, closed or deleted tenant receives `PLATFORM_ACCESS_DENIED`.
 - A user with a valid membership in tenant A cannot use that user ID with tenant B.
-- The resolved role is passed to the route callback and returned by `/v1/context`. An unknown stored role is a data-integrity error, never a permissive default. A gate checks membership, platform access, module entitlement and role permission in that order; an entitled module with a role lacking the permission returns `ROLE_DENIED` with the permission name and no rows. Scope enforcement is not implemented.
+- The resolved role is passed to the route callback and returned by `/v1/context`. An unknown stored role is a data-integrity error, never a permissive default. A gate checks membership, platform access, module entitlement and role permission in that order; an entitled module with a role lacking the permission returns `ROLE_DENIED` with the permission name and no rows. Scope is not a request-layer check: because the helper sets `app.user_id` on the same connection, the 0012 policies narrow the rows underneath the callback (§2.16), and `tests/scope.test.ts` proves the order is entitlement → role → scope by asserting a role without `people.read` is denied before any scoped row count is taken.
 - Tenant and user context are transaction-local. The membership check, platform check, module gate, role check and caller's query run on the same client and in the same transaction.
 - Every module route and job declares a read or write gate; an unentitled operation returns a stable denial code and no rows.
 - Attempts to override the tenant with `x-tenant-id` or a `tenant_id` parameter return only the principal's records.
@@ -152,7 +152,7 @@ The API and worker share one tenant transaction helper, and the same suites prov
 - Each authenticated access denial appends exactly one `authorization.denied` row. The registered route template is stored, never a query string; metadata contains no role, email, tenant slug, header, cookie, token, body or stack. A denial is still returned when the audit write fails.
 - `GET /v1/people/export` is registered in production even when proof routes are disabled. It takes the principal only from the session, applies the People read gate in the member transaction and streams through a server-side cursor. It sends `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and no `Content-Length`; a gate denial returns the typed code with no CSV; `x-tenant-id` and a `tenant_id` parameter are ignored.
 
-These suites use the real database, the runtime and auth roles, real Argon2 verification and real cookies, not mocks. They sit above the table-level denial suite. Scope enforcement, employee self-scope, role administration and seat enforcement are still not implemented.
+These suites use the real database, the runtime and auth roles, real Argon2 verification and real cookies, not mocks. They sit above the table-level denial suite. Employee self-scope, role administration and seat enforcement have no request path yet: 0012 enforces scope in the database (§2.16), but the `employee` permission set is unchanged, no route reads or writes `membership_scope` and no runtime grant reaches it.
 
 ### 2.8 Provisioning, membership and entitlements
 
@@ -275,6 +275,19 @@ What the drill proves: one logical dump of the current schema and synthetic data
 
 What this does not prove: no production producer emits events, so end-to-end delivery from a real state change to a real consumer is untested; the loop is not run under concurrency or across multiple worker processes; there is no queue-depth, latency or throughput measurement; no webhook or notification consumer exists.
 
+### 2.16 People scope (M1, database half)
+
+`tests/scope.test.ts` (21 tests) is the first M1 suite. It builds its own fixtures as `saas_owner` in disposable databases — three tenants (two People-entitled, one not), four legal entities (two in the scoped tenant), an org-unit tree `parent → mid → leaf` plus a `sibling`, eleven people (ten with employments), one person linked to a user, and memberships for a tenant-wide manager, an entity-scoped manager, a mid-unit manager, a root-unit manager, a linked employee, an unlinked employee, a suspended member and a non-member — then reads through the runtime role with both GUCs set, exactly as a request path does. It asserts, in four groups:
+
+- **Schema and privileges.** `person.user_id` is nullable, FK'd `ON DELETE SET NULL` and has a partial unique index on `(tenant_id, user_id)`; a duplicate link raises `23505`. `membership_scope` is tenant-isolated with the three composite foreign keys, the exactly-one-typed-column CHECK (`23514` for both-null, both-set and an unknown `scope_type`), the `NULLS NOT DISTINCT` unique (`23505` on a repeat) and its lookup indexes, including the partial ones. `membership` gained the `unique (tenant_id, id)` its child key needs. The eight `scope_*` policies exist as restrictive, on the right commands, with the right `USING`/`WITH CHECK` expressions, and every M0 policy is still there. Each helper is owner-owned with `search_path = ''`; the five public ones are `EXECUTE` for `saas_runtime` and the four internals are refused; `saas_worker` keeps zero table privileges, zero column privileges and exactly its eight functions. `saas_runtime` has no privilege at all on `membership_scope` and cannot read `person.user_id`.
+- **The scope invariant, derived from the catalogue.** Every runtime-readable table with a `person_id` column must carry a restrictive read policy calling `app.person_visible(person_id)`. The table set is queried, not hardcoded — today it is exactly `employment` — so a new person-child table without a policy fails rather than reading the whole tenant.
+- **Read semantics.** A tenant-wide manager with no scope rows still sees everything, which is the M0 regression guard. An entity-scoped manager sees only that entity. An org-unit manager sees the unit and its descendants and not the sibling, and widening the scope to the root widens to the whole subtree. An unplaced person is visible only to a tenant-wide member. An employee sees exactly the one linked row, and a `legal_entity` scope row attached to that employee membership does not widen it. A suspended or absent membership sees nothing, in any tenant, and scope rows never cross tenants. A tenant-only system context is not narrowed — the documented fail-open, pinned here, including that an unentitled tenant can read `person` through that path but not `employment`.
+- **Write semantics and the gate path.** A scoped manager updates and deletes in-scope employment rows and gets zero rows out of scope; an out-of-scope employment insert fails `42501` on the RLS policy, with the error naming `employment` rather than a privilege. An employee cannot write even its own person row. The `person` DML policies are asserted in `pg_policy` alongside the fact that `saas_runtime` holds no `person` write privilege, so the suite states which layer any `42501` on that table comes from. Through `withMemberTransaction`, entitlement and role are decided first: a role without `people.read` is refused with `ROLE_DENIED` before the scoped row set is read, a non-member with `MEMBERSHIP_DENIED`, and an entitled manager's callback receives exactly the scoped ids.
+
+What this does not prove: no product path writes `membership_scope` or `person.user_id`, so scope is unreachable through the API, the web shell or a CLI; project and client scope do not exist; the fail-open system context stays open by design and is closed only by route discipline; `person` writes are pinned by catalogue and helper assertions because the runtime role cannot write that table at all; and no payroll, leave or timesheet surface consumes scope yet.
+
+`tests/migration-rollforward.test.ts` — the T15 suite that applies 0011 into a truncated migration directory, populates rows and then upgrades to the full set — is extended rather than replaced: it now also proves that pre-upgrade persons arrive unlinked, that `membership_scope` is created empty, that a pre-upgrade person is still readable by a tenant-wide member and by a system context, and that the helpers and all eight policies land on the upgraded database. `tests/schema-inventory.test.ts` re-derives the counts (67 tables with `tenant_id`, 65 RLS, 274 policies split 66 permissive isolation / 208 restrictive, one isolation policy per RLS table, the eight `scope_*` names) and adds the nine new helpers to the list the worker is denied.
+
 ---
 
 ## 3. Test data
@@ -294,7 +307,8 @@ The workflow at [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) is 
 - Type check, lint and import-boundary lint.
 - Unit, contract and integration tests.
 - Tenant isolation suite over the RLS tenant business tables, plus the explicit identity-table privilege tests.
-- Schema inventory: 66 tables with `tenant_id`, 64 RLS tables, exactly two no-RLS identity exceptions, no forced RLS, the exact runtime table grants, the eight person column grants, and the `saas_worker` surface (zero table and column privileges, exactly eight executable `app` functions, four of them security definer).
+- Schema inventory: 67 tables with `tenant_id`, 65 RLS tables, exactly two no-RLS identity exceptions, no forced RLS, 274 policies (66 permissive isolation, one per RLS table, and 208 restrictive), the exact runtime table grants, the eight person column grants, and the `saas_worker` surface (zero table and column privileges, exactly eight executable `app` functions, four of them security definer).
+- People scope suite (§2.16): the membership_scope constraints, the eight restrictive policies, the helper grant surface, the derived `person_id` scope invariant, read and write narrowing for entity, org-unit subtree and employee self-scope, the pinned fail-open system context, and scope applied after entitlement and role.
 - Outbox suite (§2.15): claim-helper guards, worker-role refusal of direct `domain_event` access, cross-tenant filtering, expired-lease re-claim, retry backoff and dead-lettering, duplicate delivery, and entitlement and suspension skips.
 - Module entitlement suite, including expiry, cancellation, dependency degradation and catalog write protection.
 - Authentication and session suite: login, invitation acceptance, cookie attributes, session expiry/revocation, CSRF/Origin checks and the auth-role privilege matrix.

@@ -58,6 +58,19 @@ grant execute on function app.has_active_module(text) to saas_runtime;
 -- Resolves the membership role without granting SELECT on public.membership.
 grant execute on function app.current_member_role() to saas_runtime;
 
+-- M1 people scope. These are the predicates behind the scope_* policies on
+-- person and employment, plus the two context readers they expose. The
+-- internal helpers (current_active_membership_id, member_has_scope,
+-- org_unit_is_in_scope_subtree, member_placement_matches) stay owner-only:
+-- they are called by the definer helpers above, which run as the owner. No
+-- grant here touches public.membership_scope - SELECT on that table is never
+-- given to the runtime role, which is why the scope readers are definers.
+grant execute on function app.current_user_id() to saas_runtime;
+grant execute on function app.current_person_id() to saas_runtime;
+grant execute on function app.person_visible(uuid) to saas_runtime;
+grant execute on function app.person_in_scope(uuid) to saas_runtime;
+grant execute on function app.person_placement_in_scope(uuid, uuid) to saas_runtime;
+
 -- The policy installer is owner-only. The blanket revoke above already covers
 -- it; this line keeps that contract explicit.
 revoke execute on procedure app.apply_module_policies() from saas_runtime;

@@ -62,7 +62,7 @@ afterAll(async () => {
 describe('local database harness', () => {
   test('fresh apply records every baseline migration and creates the schema', async () => {
     const expected = await listSqlFiles(migrationsDir);
-    expect(expected).toHaveLength(11);
+    expect(expected).toHaveLength(12);
 
     const result = await migrate({ ownerUrl: db().ownerUrl });
     expect(result.applied).toEqual(expected);
@@ -97,6 +97,7 @@ describe('local database harness', () => {
           'import_batch',
           'auth_session',
           'invitation',
+          'membership_scope',
         ]),
       );
 

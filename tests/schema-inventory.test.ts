@@ -43,7 +43,7 @@ afterAll(async () => {
 });
 
 describe('schema inventory', () => {
-  test('has 66 tenant-id tables, with exactly two auth exceptions from RLS', async () => {
+  test('has 67 tenant-id tables, with exactly two auth exceptions from RLS', async () => {
     const client = await ownerClient();
     try {
       const result = await client.query<TenantTable>(`
@@ -70,9 +70,9 @@ describe('schema inventory', () => {
          order by t.table_name
       `);
 
-      expect(result.rows).toHaveLength(66);
+      expect(result.rows).toHaveLength(67);
       const isolated = result.rows.filter((row) => row.rls);
-      expect(isolated).toHaveLength(64);
+      expect(isolated).toHaveLength(65);
       expect(isolated.every((row) => row.has_permissive_isolation)).toBe(true);
       expect(isolated.every((row) => row.policy_count >= 1)).toBe(true);
 
@@ -80,6 +80,70 @@ describe('schema inventory', () => {
       expect(exceptions.map((row) => row.table_name)).toEqual(['auth_session', 'invitation']);
       expect(exceptions.every((row) => !row.has_permissive_isolation)).toBe(true);
       expect(exceptions.every((row) => row.policy_count === 0)).toBe(true);
+    } finally {
+      await client.end();
+    }
+  });
+
+  test('holds exactly one permissive isolation policy per RLS table inside the reviewed 274-policy inventory', async () => {
+    const client = await ownerClient();
+    try {
+      const totals = await client.query<{ permissive: string; restrictive: string }>(`
+        select count(*) filter (where p.polpermissive)::text as permissive,
+               count(*) filter (where not p.polpermissive)::text as restrictive
+          from pg_policy p
+          join pg_class c on c.oid = p.polrelid
+          join pg_namespace n on n.oid = c.relnamespace
+         where n.nspname = 'public'
+      `);
+      expect(totals.rows).toEqual([{ permissive: '66', restrictive: '208' }]);
+
+      const perTable = await client.query<{ rls_tables: string; with_isolation: string }>(`
+        select count(*) filter (where c.relrowsecurity)::text as rls_tables,
+               count(*) filter (
+                 where exists (
+                   select 1 from pg_policy p
+                    where p.polrelid = c.oid and p.polpermissive
+                 )
+               )::text as with_isolation
+          from pg_class c
+          join pg_namespace n on n.oid = c.relnamespace
+         where n.nspname = 'public' and c.relkind = 'r'
+      `);
+      // Every RLS-enabled table carries exactly one permissive policy
+      // (tenant_isolation, or tenant_self on tenant) and nothing else.
+      expect(perTable.rows).toEqual([{ rls_tables: '66', with_isolation: '66' }]);
+
+      const multiIsolation = await client.query<{ relname: string }>(`
+        select c.relname
+          from pg_class c
+          join pg_namespace n on n.oid = c.relnamespace
+         where n.nspname = 'public' and c.relkind = 'r'
+           and (select count(*) from pg_policy p where p.polrelid = c.oid and p.polpermissive) > 1
+      `);
+      expect(multiIsolation.rows).toEqual([]);
+
+      const scopePolicies = await client.query<{ table_name: string; polname: string }>(`
+        select c.relname as table_name, p.polname
+          from pg_policy p
+          join pg_class c on c.oid = p.polrelid
+         where c.relname in ('person', 'employment')
+           and p.polname like 'scope_%'
+         order by c.relname, p.polname
+      `);
+      // 0012 adds the same four names to both tables. They are restrictive, so
+      // they AND with tenant_isolation and the module_people_* set instead of
+      // replacing either; tests/scope.test.ts asserts the expressions.
+      expect(scopePolicies.rows.map((row) => `${row.table_name}.${row.polname}`)).toEqual([
+        'employment.scope_delete',
+        'employment.scope_insert',
+        'employment.scope_read',
+        'employment.scope_update',
+        'person.scope_delete',
+        'person.scope_insert',
+        'person.scope_read',
+        'person.scope_update',
+      ]);
     } finally {
       await client.end();
     }
@@ -268,8 +332,9 @@ describe('schema inventory', () => {
   });
 
   // T13 deliberately adds saas_worker: CONNECT at bootstrap, schema usage
-  // and the eight EXECUTE grants below from 0011_outbox.sql. Any change to
-  // this inventory must be a reviewed migration, not a runtime grant.
+  // and the eight EXECUTE grants below from 0011_outbox.sql. 0012_people_scope.sql
+  // grants it none of the nine scope helpers. Any change to this inventory must
+  // be a reviewed migration, not a runtime grant.
   test('grants the worker no table or column privileges at all', async () => {
     const client = await ownerClient();
     try {
@@ -326,17 +391,32 @@ describe('schema inventory', () => {
            and p.proname in ('current_member_role', 'has_switch_access',
                              'has_active_module', 'auth_activate_membership',
                              'apply_module_policies', 'enable_tenant_rls',
-                             'block_mutation')
+                             'block_mutation',
+                             'current_user_id', 'current_person_id', 'person_visible',
+                             'person_in_scope', 'person_placement_in_scope',
+                             'current_active_membership_id', 'member_has_scope',
+                             'org_unit_is_in_scope_subtree', 'member_placement_matches')
          order by 1
       `);
+      // 0012 adds nine scope functions and grants the worker none of them: the
+      // worker path has no person or scope reads at all.
       expect(denied.rows.map((row) => row.proname)).toEqual([
         'apply_module_policies',
         'auth_activate_membership',
         'block_mutation',
+        'current_active_membership_id',
         'current_member_role',
+        'current_person_id',
+        'current_user_id',
         'enable_tenant_rls',
         'has_active_module',
         'has_switch_access',
+        'member_has_scope',
+        'member_placement_matches',
+        'org_unit_is_in_scope_subtree',
+        'person_in_scope',
+        'person_placement_in_scope',
+        'person_visible',
       ]);
 
       const definer = await client.query<{ proname: string; prosecdef: boolean }>(`
