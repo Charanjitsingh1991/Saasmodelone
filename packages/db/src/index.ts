@@ -62,6 +62,25 @@ export { provisionTenant, ProvisioningError } from './provision.js';
 export type { SeedOptions } from './seed.js';
 export { seed } from './seed.js';
 export type {
+  GetMembershipScopeInput,
+  LinkPersonUserInput,
+  MembershipScopeEntry,
+  MembershipScopeView,
+  ScopeAdminErrorCode,
+  ScopeChangeResult,
+  ScopeType,
+  ScopeValue,
+  SetMembershipScopeInput,
+  UnlinkPersonUserInput,
+} from './scope.js';
+export {
+  getMembershipScope,
+  linkPersonUser,
+  ScopeAdminError,
+  setMembershipScope,
+  unlinkPersonUser,
+} from './scope.js';
+export type {
   MemberContext,
   MemberTransactionOptions,
   MembershipRole,

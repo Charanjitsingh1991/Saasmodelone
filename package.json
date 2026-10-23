@@ -24,6 +24,7 @@
     "db:seed": "node --import tsx packages/db/src/cli.ts seed",
     "db:provision": "node --import tsx packages/db/src/cli.ts provision",
     "db:invite": "node --import tsx packages/db/src/cli.ts invite",
+    "db:scope": "node --import tsx packages/db/src/cli.ts scope",
     "db:setup": "pnpm db:bootstrap && pnpm db:migrate && pnpm db:seed",
     "drill:restore": "node --env-file=.env --import tsx scripts/restore-drill.ts"
   },

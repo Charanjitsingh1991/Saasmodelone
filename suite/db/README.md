@@ -23,6 +23,20 @@ The reproducible local developer database is all five commands above in that ord
 
 `db:invite` creates a one-time invitation for a user with an invited membership in the tenant. It connects with `DB_OWNER_URL`, never the runtime URL, validates the tenant slug, email and expiry window (1–30 days, default 7), revokes older unconsumed invitations for the same membership, and prints the invitation ID, tenant ID, email, expiry and the raw token exactly once with an out-of-band delivery warning. It does not print a password or connection string and is not exposed by the API. The invited user may be a first-time invitee or an already-active user being added to a second tenant; an active user must already hold a password, since acceptance reuses the existing credential rather than setting one.
 
+`db:scope` is the owner-only authoring path for the 0012 scope layer: it writes `person.user_id` and `membership_scope`, the two things nothing else can write. It connects with `DB_OWNER_URL`, never the runtime URL, and is not exposed by the API.
+
+```bash
+pnpm db:scope link   --tenant <slug> --person <employee-code|uuid> --user <email> --actor <email>
+pnpm db:scope unlink --tenant <slug> --person <employee-code|uuid> --actor <email>
+pnpm db:scope set    --tenant <slug> --user <email> --actor <email> \
+  (--legal-entity <code|uuid> … | --org-unit <uuid> … | --tenant-wide)
+pnpm db:scope show   --tenant <slug> --user <email>
+```
+
+`--actor` must resolve to a user holding an active `owner` membership in that tenant, and `set` is a full replacement of one membership's scope rows: the resulting set is written in one transaction, an identical set is a no-op, and `--tenant-wide` means "no rows" and cannot be combined with a scope list. Scope targets must exist inside the same tenant and not be soft-deleted; duplicates are refused; an `employee` membership is refused because a scope row can never widen self-scope. `show` is the read side used before and after a change and prints the membership role, status and each scope row with its label (legal-entity code and name, or org-unit name).
+
+Every accepted change appends `person.user.linked`, `person.user.unlinked` or `membership.scope.changed` in the same transaction as the write, so an audit failure rolls the change back; a refusal or a no-op writes nothing. Output is JSON with ids and labels only — no tokens, no passwords, no connection strings. Org units have no code, so `--org-unit` takes a uuid. The library behind it is `packages/db/src/scope.ts` and the tests are `tests/scope-admin.test.ts`.
+
 ## Database roles
 
 `pnpm db:bootstrap` creates four roles:
@@ -158,7 +172,7 @@ A payroll run records the exact rule packs it used. Changing a rule means adding
 - Password reset, email delivery, MFA, OAuth/SSO, SCIM, tenant switching, session rotation, device lists and distributed rate limiting. Login by tenant slug, session validation, CSRF checks and one-time invitation acceptance exist; the web shell has sign-in and sign-out, but there is no invitation, password-reset or session-management UI.
 - People data entry, CRUD, import or export UI, and screens for modules other than the empty People state. The web shell reads `/v1/context` and performs no People query; it needs no schema or grant change.
 - Authentication-event audit. Provisioning, entitlement changes, authenticated access denials and People directory exports are audited; login, failed login, logout, invitation creation and invitation acceptance are not.
-- Scope administration. 0012 builds the database half of scope authorization — the person/user link, `membership_scope`, the helpers and the restrictive policies for legal entity, org unit and employee self-scope — but nothing writes a scope row: there is no API, UI or CLI path and no runtime grant. Project and client scope, role administration and seat enforcement are not built. Employee self-scope is enforced in SQL, but the `employee` role still holds no permission in `@saasmodels/contracts`, so an employee request denies at `ROLE_DENIED` before the policy is reached.
+- Scope administration. 0012 builds the database half of scope authorization — the person/user link, `membership_scope`, the helpers and the restrictive policies for legal entity, org unit and employee self-scope — and the owner-only `packages/db/src/scope.ts` library plus `pnpm db:scope` now write both, each change audited in its own transaction. What is still absent: any API, UI or request-layer use of scope, a runtime grant on `membership_scope` or `person.user_id`, a scope-aware export or search, project and client scope, and role and seat administration. Employee self-scope is enforced in SQL, but the `employee` role still holds no permission in `@saasmodels/contracts`, so an employee request denies at `ROLE_DENIED` before the policy is reached; `db:scope` therefore refuses to put scope rows on an employee membership.
 - An audit read API or UI and an entitlement administration UI. Authenticated access denials and export events are written, but there is no read surface for them.
 - Full data export and portability. M0 has one production export: the People directory identity CSV (`GET /v1/people/export`) with seven fields, the `people.read` gate, a column-level grant, a server-side cursor and a pre-disclosure audit row. There is no Client or Work export; no employment, payroll, tax-identifier, bank or personal-contact export; no filter, column selection or date range; no asynchronous or background export, signed URL, storage bucket, export history, dedicated export permission or export rate limit; and no full-suite export/re-import.
 - `FORCE ROW LEVEL SECURITY` by default. Provisioning is tested under FORCE on `tenant`; the table is not forced in a migration.

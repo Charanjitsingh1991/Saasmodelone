@@ -132,23 +132,42 @@ database.
   results; `employment`, which the runtime can write, is exercised end to end
   with real zero-row and `42501` outcomes. The scope suite asserts both, so
   nobody misreads the source of a denial.
-- **`person.user_id` is a new join between identity and the directory.** It is
-  owner-written for now: the runtime has no `UPDATE` on the column and
-  provisioning does not set it. An administration path to link a person to a
-  user is M1 work, and until it exists the employee self-scope path can only be
-  demonstrated with fixtures.
-- **Scope rows have no authoring surface.** There is no API, UI or CLI that
-  writes `membership_scope`, and the runtime role cannot write it. Role
-  administration, seat enforcement and scope administration land together later
-  in M1.
+- **`person.user_id` is owner-written, out of band.** The runtime has no `UPDATE`
+  on the column and provisioning does not set it. The authoring surface is
+  `packages/db/src/scope.ts` (`linkPersonUser`, `unlinkPersonUser`) behind
+  `pnpm db:scope`, which takes `DB_OWNER_URL`, requires the actor to hold an
+  active `owner` membership in that tenant, validates tenant, person and user
+  with tenant-scoped queries rather than trusting the caller, and appends
+  `person.user.linked` / `person.user.unlinked` in the same transaction so an
+  audit failure rolls the link back. Re-linking the same pair is a no-op with no
+  second audit row; a conflicting link refuses with `PERSON_ALREADY_LINKED` or
+  `USER_ALREADY_LINKED` and writes nothing.
+- **Scope rows have an owner-only authoring surface, not an application one.**
+  `setMembershipScope` replaces one membership's rows in a single transaction —
+  refuses duplicates, an empty list without `--tenant-wide`, a tenant-wide
+  request that also names scopes, targets that are unknown, cross-tenant or
+  soft-deleted, and any `employee` membership, because a scope row can never
+  widen self-scope and would only be dead data. `getMembershipScope` is the read
+  side used by `show`. There is still no API, UI or runtime grant for any of it:
+  `saas_runtime` and `saas_worker` cannot read or write `membership_scope` or
+  `person.user_id`, which is why these four functions take an owner `Pool` and
+  why the checks are hand-written — the owner role bypasses RLS by ownership.
+  Role administration and seat enforcement are still absent.
 - **The fail-open residual needs a decision before real data.** A route that
   serves member requests through `withTenantTransaction` would silently skip
   scope. `tests/scope.test.ts` pins the behaviour, threat model row T36 records
   it, and the review question is who guarantees that no member path takes the
   system helper — today that guarantee is import boundaries and code review.
+- **The authoring path is itself a threat surface.** Threat model row T37 records
+  it: whoever holds `DB_OWNER_URL` can link the wrong person or grant an
+  over-broad scope, and the only detective control is the audit row, which has no
+  read API or UI yet. Grant review today means a query on the owner connection.
 - **Schema counts move**, and the pinned inventory, roll-forward and harness
   tests were re-derived rather than hand-adjusted: 75 public base tables, 67 with
   `tenant_id`, 66 RLS-enabled public tables (65 of them carrying `tenant_id`),
   274 policies (66 permissive, 208 restrictive), 12 migrations, and 12
   runtime-executable `app` functions. The `saas_worker` surface is unchanged at
-  zero table privileges and exactly eight executable functions.
+  zero table privileges and exactly eight executable functions. The owner-only
+  scope administration slice adds no migration, no policy, no grant and no
+  function to either surface, so all of these figures are unchanged by it and
+  were re-derived from the live database to confirm that.
