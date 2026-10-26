@@ -69,9 +69,21 @@ to prove the M0 exit criterion.
   panel changes no decision in this ADR — still three routes, no routing library, the
   CSRF token in module memory only, the theme the only stored preference, nothing rendered
   as raw HTML, and no scope label, because the runtime still cannot read `membership_scope`.
-  There is still no delete, restore, status, placement or employment control, no import and
+  There was then no delete, restore, status, placement or employment control, no import and
   no export button, and the write path itself is decided in
   [`0008-people-write-path.md`](0008-people-write-path.md).
+- M1 note (third): that row now also carries a **Place** action, and the directory table has a
+  **Placement** column. For a `people.write` member it opens a second inline panel that fetches
+  its choices from `GET /v1/people/placement-options` and writes one whole pair through
+  `PATCH /v1/people/:id/placement`; **Unplaced** appears only when the server says the member may
+  remove a placement, a stored placement the member was not offered leaves the selection empty so
+  the panel cannot submit a change it never displayed, and the identity panel keeps pointing at
+  Place instead of editing those columns. None of it changes a decision in this ADR — still three
+  routes, no routing library, the CSRF token in module memory only, the theme the only stored
+  preference, every value a React text node, and still no scope label, because `membership_scope`
+  remains unreadable to the runtime. There is still no delete, restore, status or employment
+  control, no import and no export button. Placement itself is decided in
+  [`0009-people-placement.md`](0009-people-placement.md).
 - The client bundle is small enough to reason about but not split by route yet;
   code splitting can be introduced when module screens exist.
 - Same-origin deployment means cookies use `SameSite=Strict` without CORS

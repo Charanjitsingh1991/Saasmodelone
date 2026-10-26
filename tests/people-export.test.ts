@@ -124,6 +124,20 @@ async function withRuntime<T>(fn: (client: Client) => Promise<T>): Promise<T> {
   }
 }
 
+async function legalEntityName(id: string): Promise<string> {
+  return withOwner(async (client) => {
+    const result = await client.query<{ name: string }>(
+      'select name from legal_entity where id = $1',
+      [id],
+    );
+    const row = result.rows[0];
+    if (!row) {
+      throw new Error('Expected one legal entity row');
+    }
+    return row.name;
+  });
+}
+
 async function exportAuditRows(tenantId: string): Promise<ExportAuditRow[]> {
   return withOwner(async (client) => {
     const result = await client.query<ExportAuditRow>(
@@ -294,6 +308,7 @@ describe('People directory export', () => {
           'designation',
           'employment_type',
           'legal_entity_id',
+          'org_unit_id',
           'manager_person_id',
           'created_at',
           'updated_at',
@@ -319,6 +334,11 @@ describe('People directory export', () => {
         expect(response.body).not.toContain(fx().b.personId);
         expect(response.body).not.toContain(fx().softDeletedPerson.id);
         expect(response.body).not.toContain(fx().softDeletedPerson.displayName);
+        // Placement is a directory attribute, not an export field: neither the
+        // id nor the name it points at reaches the CSV.
+        expect(response.body).not.toContain(
+          await legalEntityName(fx().a.legalEntityId),
+        );
 
         const proof = await app.inject({
           method: 'GET',
@@ -509,7 +529,7 @@ describe('People directory export', () => {
     expect(await exportAuditRows(a.tenantId)).toHaveLength(before.length);
   });
 
-  test('grants only the exported person columns to the runtime role', async () => {
+  test('grants the runtime the exported and placement read columns on person', async () => {
     await withRuntime(async (client) => {
       const tableSelect = await client.query<{ allowed: boolean }>(
         "select has_table_privilege(current_user, 'public.person', 'SELECT') as allowed",
@@ -535,6 +555,8 @@ describe('People directory export', () => {
         'first_name',
         'id',
         'last_name',
+        'legal_entity_id',
+        'org_unit_id',
         'phone',
         'work_email',
       ]);
@@ -550,8 +572,6 @@ describe('People directory export', () => {
         'status',
         'designation',
         'employment_type',
-        'legal_entity_id',
-        'org_unit_id',
         'location_id',
         'manager_person_id',
         'created_at',

@@ -1,9 +1,11 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { Fragment, useEffect, useState, type FormEvent } from 'react';
 import type {
   ContextResponse,
   PeopleCreateInput,
   PeopleListItem,
   PeopleListResponse,
+  PeoplePlacementInput,
+  PeoplePlacementOptions,
   PeopleUpdateInput,
 } from '@saasmodels/contracts';
 import {
@@ -183,6 +185,96 @@ function peopleWriteErrorCopy(code: string | null): string {
   return PEOPLE_WRITE_ERROR_COPY[code] ?? PEOPLE_WRITE_ERROR_FALLBACK;
 }
 
+// The placement route has its own failures, and PLACEMENT_NOT_FOUND is the
+// shaped answer for a legal entity or org unit this member cannot reach.
+const PEOPLE_PLACEMENT_ERROR_COPY: Record<string, string> = {
+  PLACEMENT_NOT_FOUND: 'That legal entity or org unit is not available to you.',
+  SCOPE_DENIED: 'Only a workspace-wide role can remove a placement.',
+  INVALID_BODY:
+    'Choose one legal entity, or one org unit inside the legal entity you chose.',
+  CSRF_INVALID:
+    'This browser no longer matches your session. Sign out, sign in again and retry.',
+  NETWORK: 'The workspace could not be reached. Check your connection and try again.',
+};
+
+const PEOPLE_PLACEMENT_ERROR_FALLBACK =
+  'The placement could not be saved. Try again.';
+
+const PLACEMENT_OPTIONS_ERROR = 'The placement choices could not be loaded.';
+
+function peoplePlacementErrorCopy(code: string | null): string {
+  if (code === null) {
+    return PEOPLE_PLACEMENT_ERROR_FALLBACK;
+  }
+  return PEOPLE_PLACEMENT_ERROR_COPY[code] ?? PEOPLE_PLACEMENT_ERROR_FALLBACK;
+}
+
+type PlacementOptionsState =
+  | { phase: 'idle' }
+  | { phase: 'loading' }
+  | { phase: 'error' }
+  | { phase: 'ready'; data: PeoplePlacementOptions };
+
+// One select value per choice: an org unit carries its own id and the route
+// sends the pair, an entity is entity-only, and 'unplaced' is the both-null
+// write. A person placed somewhere this member was not offered keeps an empty
+// selection, so the panel cannot submit a change it never displayed.
+function placementSelection(
+  person: PeopleListItem,
+  options: PeoplePlacementOptions,
+): string {
+  if (
+    person.orgUnitId !== null &&
+    options.orgUnits.some((unit) => unit.id === person.orgUnitId)
+  ) {
+    return `ou:${person.orgUnitId}`;
+  }
+  if (
+    person.legalEntityId !== null &&
+    person.orgUnitId === null &&
+    options.legalEntities.some(
+      (entity) => entity.placeable && entity.id === person.legalEntityId,
+    )
+  ) {
+    return `le:${person.legalEntityId}`;
+  }
+  if (
+    person.legalEntityId === null &&
+    person.orgUnitId === null &&
+    options.canUnplace
+  ) {
+    return 'unplaced';
+  }
+  return '';
+}
+
+function placementInputFromSelection(
+  selection: string,
+  options: PeoplePlacementOptions,
+): PeoplePlacementInput | null {
+  if (selection === 'unplaced') {
+    return { legalEntityId: null, orgUnitId: null };
+  }
+  if (selection.startsWith('le:')) {
+    const id = selection.slice(3);
+    const entity = options.legalEntities.find(
+      (candidate) => candidate.id === id && candidate.placeable,
+    );
+    return entity ? { legalEntityId: entity.id, orgUnitId: null } : null;
+  }
+  if (selection.startsWith('ou:')) {
+    const unit = options.orgUnits.find((candidate) => candidate.id === selection.slice(3));
+    return unit ? { legalEntityId: unit.legalEntityId, orgUnitId: unit.id } : null;
+  }
+  return null;
+}
+
+function placementCopy(person: PeopleListItem): string {
+  return [person.legalEntityName, person.orgUnitName]
+    .filter((name): name is string => name !== null)
+    .join(' · ');
+}
+
 function formValuesFromPerson(person: PeopleListItem): PeopleFormValues {
   return {
     firstName: person.firstName,
@@ -302,9 +394,9 @@ function PeopleWriteForm({
       </div>
 
       <p className="fine-print people-form-note">
-        A new person is saved without a legal entity or org unit. Only a
-        workspace-wide owner, admin or HR can add people; placement is not
-        editable here yet.
+        {mode === 'create'
+          ? 'A new person is added unplaced. Only a workspace-wide owner, admin or HR can add people; use Place afterwards.'
+          : 'These are the identity fields only. Use Place to change the legal entity or org unit.'}
       </p>
     </form>
   );
@@ -324,6 +416,13 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
+  const [placing, setPlacing] = useState<PeopleListItem | null>(null);
+  const [placementOptions, setPlacementOptions] =
+    useState<PlacementOptionsState>({ phase: 'idle' });
+  const [placementValue, setPlacementValue] = useState('');
+  const [placementAttempt, setPlacementAttempt] = useState(0);
+  const [placementSubmitting, setPlacementSubmitting] = useState(false);
+  const [placementError, setPlacementError] = useState<string | null>(null);
 
   useEffect(() => {
     // A response is dropped once the search or page has moved on, so a slow
@@ -357,6 +456,42 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
     };
   }, [term, page, attempt]);
 
+  useEffect(() => {
+    // The choices are fetched when the panel opens, not with the directory: the
+    // list is the server's own scope answer for this member, and a response
+    // that arrives after the panel moved on is dropped.
+    if (placing === null) {
+      return;
+    }
+    let stale = false;
+    const person = placing;
+
+    async function loadOptions() {
+      setPlacementOptions({ phase: 'loading' });
+      const result = await api.placementOptions();
+      if (stale) {
+        return;
+      }
+      if (!result.ok) {
+        // A 401 is handled by the global listener that returns the app to
+        // sign-in, so the panel simply goes with it.
+        if (result.status !== 401) {
+          setPlacementOptions({ phase: 'error' });
+        } else {
+          setPlacing(null);
+        }
+        return;
+      }
+      setPlacementOptions({ phase: 'ready', data: result.data });
+      setPlacementValue(placementSelection(person, result.data));
+    }
+
+    void loadOptions();
+    return () => {
+      stale = true;
+    };
+  }, [placing, placementAttempt]);
+
   const data = state.phase === 'ready' ? state.data : null;
   const totalPages =
     data === null ? 1 : Math.max(1, Math.ceil(data.total / data.pageSize));
@@ -374,6 +509,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
   }
 
   function openCreateForm() {
+    closePlacement();
     setSavedMessage(null);
     setFormError(null);
     setValues(EMPTY_PEOPLE_FORM);
@@ -381,10 +517,35 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
   }
 
   function openEditForm(person: PeopleListItem) {
+    closePlacement();
     setSavedMessage(null);
     setFormError(null);
     setValues(formValuesFromPerson(person));
     setForm({ mode: 'update', person });
+  }
+
+  // One panel at a time: opening Place closes any open identity form and starts
+  // with no error and no selection, so a stale choice cannot be submitted for a
+  // different person.
+  function openPlacement(person: PeopleListItem) {
+    closeForm();
+    setSavedMessage(null);
+    setPlacementError(null);
+    setPlacementValue('');
+    setPlacementOptions({ phase: 'idle' });
+    setPlacing(person);
+  }
+
+  function closePlacement() {
+    setPlacing(null);
+    setPlacementOptions({ phase: 'idle' });
+    setPlacementValue('');
+    setPlacementError(null);
+  }
+
+  function retryPlacementOptions() {
+    setPlacementError(null);
+    setPlacementAttempt((current) => current + 1);
   }
 
   async function submitForm(event: FormEvent<HTMLFormElement>) {
@@ -416,7 +577,50 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
     setAttempt((current) => current + 1);
   }
 
+  async function submitPlacement(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (placing === null || placementOptions.phase !== 'ready' || placementSubmitting) {
+      return;
+    }
+    const input = placementInputFromSelection(placementValue, placementOptions.data);
+    if (input === null) {
+      // A selection the server would not accept cannot be submitted at all.
+      setPlacementError(peoplePlacementErrorCopy('INVALID_BODY'));
+      return;
+    }
+
+    setPlacementSubmitting(true);
+    setPlacementError(null);
+    const result = await api.updatePlacement(placing.id, input);
+    setPlacementSubmitting(false);
+
+    if (!result.ok) {
+      if (result.status === 401) {
+        closePlacement();
+        return;
+      }
+      setPlacementError(peoplePlacementErrorCopy(result.code));
+      return;
+    }
+
+    closePlacement();
+    setSavedMessage('Placement updated.');
+    // Reload the same search and page the directory is already showing.
+    setAttempt((current) => current + 1);
+  }
+
   const canWrite = people?.canWrite === true;
+  // Save stays put while the choice still matches what is stored, so the screen
+  // never claims an update that would change nothing.
+  const chosenPlacement =
+    placing !== null && placementOptions.phase === 'ready'
+      ? placementInputFromSelection(placementValue, placementOptions.data)
+      : null;
+  const placementIsUnchanged =
+    chosenPlacement !== null &&
+    placing !== null &&
+    chosenPlacement.legalEntityId === placing.legalEntityId &&
+    chosenPlacement.orgUnitId === placing.orgUnitId;
 
   return (
     <article className="page page--people">
@@ -458,7 +662,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
               className="button button--primary button--small"
               type="button"
               onClick={openCreateForm}
-              disabled={form !== null}
+              disabled={form !== null || placing !== null}
             >
               Add person
             </button>
@@ -485,6 +689,112 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
           />
         ) : null}
 
+        {placing ? (
+          <div className="placement-panel" aria-labelledby="placement-title">
+            <h3 id="placement-title" className="people-form-title">
+              Place {placing.displayName}
+            </h3>
+
+            {placementOptions.phase === 'loading' ? (
+              <p className="placement-state">Loading the placement choices…</p>
+            ) : null}
+
+            {placementOptions.phase === 'error' ? (
+              <div className="placement-state">
+                <p className="form-alert" role="alert">
+                  {PLACEMENT_OPTIONS_ERROR}
+                </p>
+                <button
+                  className="button button--quiet button--small"
+                  type="button"
+                  onClick={retryPlacementOptions}
+                >
+                  Try again
+                </button>
+              </div>
+            ) : null}
+
+            {placementOptions.phase === 'ready' ? (
+              <form className="placement-form" onSubmit={(event) => void submitPlacement(event)}>
+                <div className="field">
+                  <label htmlFor="people-placement">Legal entity or org unit</label>
+                  <select
+                    id="people-placement"
+                    name="placement"
+                    value={placementValue}
+                    disabled={placementSubmitting}
+                    onChange={(event) => setPlacementValue(event.target.value)}
+                  >
+                    {placementOptions.data.canUnplace ? (
+                      <option value="unplaced">Unplaced</option>
+                    ) : null}
+                    {placementOptions.data.legalEntities.map((entity) => {
+                      const units = placementOptions.data.orgUnits.filter(
+                        (unit) => unit.legalEntityId === entity.id,
+                      );
+                      return (
+                        <Fragment key={entity.id}>
+                          {entity.placeable ? (
+                            <option value={`le:${entity.id}`}>{entity.name}</option>
+                          ) : null}
+                          {units.length > 0 ? (
+                            <optgroup label={entity.name}>
+                              {units.map((unit) => (
+                                <option value={`ou:${unit.id}`} key={unit.id}>
+                                  {unit.name}
+                                </option>
+                              ))}
+                            </optgroup>
+                          ) : null}
+                        </Fragment>
+                      );
+                    })}
+                  </select>
+                  {placementOptions.data.legalEntities.length === 0 ? (
+                    <p className="fine-print placement-empty">
+                      No legal entity or org unit is available yet. They are
+                      created outside this screen today.
+                    </p>
+                  ) : null}
+                </div>
+
+                {placementError ? (
+                  <p className="form-alert" role="alert">
+                    {placementError}
+                  </p>
+                ) : null}
+
+                <div className="people-form-actions">
+                  <button
+                    className="button button--primary"
+                    type="submit"
+                    disabled={
+                      placementSubmitting ||
+                      placementValue === '' ||
+                      placementIsUnchanged
+                    }
+                  >
+                    Save placement
+                  </button>
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    onClick={closePlacement}
+                    disabled={placementSubmitting}
+                  >
+                    Close
+                  </button>
+                </div>
+
+                <p className="fine-print">
+                  Placement is a directory attribute, not an employment record.
+                  Status, employment and compensation are not editable here yet.
+                </p>
+              </form>
+            ) : null}
+          </div>
+        ) : null}
+
         {state.phase === 'error' ? (
           <div className="directory-state">
             <p className="directory-error" role="alert">
@@ -507,6 +817,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
                   <th scope="col">Employee code</th>
                   <th scope="col">Work email</th>
                   <th scope="col">Phone</th>
+                  <th scope="col">Placement</th>
                   {canWrite ? <th scope="col">Actions</th> : null}
                 </tr>
               </thead>
@@ -517,15 +828,26 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
                     <td>{person.employeeCode ?? '—'}</td>
                     <td>{person.workEmail ?? '—'}</td>
                     <td>{person.phone ?? '—'}</td>
+                    <td>{placementCopy(person) === '' ? '—' : placementCopy(person)}</td>
                     {canWrite ? (
-                      <td>
+                      <td className="directory-actions">
                         <button
                           className="button button--quiet button--small"
                           type="button"
                           aria-label={`Edit ${person.displayName}`}
                           onClick={() => openEditForm(person)}
+                          disabled={placing !== null}
                         >
                           Edit
+                        </button>
+                        <button
+                          className="button button--quiet button--small"
+                          type="button"
+                          aria-label={`Place ${person.displayName}`}
+                          onClick={() => openPlacement(person)}
+                          disabled={form !== null || placing?.id === person.id}
+                        >
+                          Place
                         </button>
                       </td>
                     ) : null}

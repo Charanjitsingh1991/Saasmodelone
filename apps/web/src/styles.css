@@ -90,7 +90,8 @@ p {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
   color: inherit;
 }
@@ -359,7 +360,8 @@ a {
   letter-spacing: 0.01em;
 }
 
-.field input {
+.field input,
+.field select {
   width: 100%;
   height: 52px;
   padding: 0 14px;
@@ -372,13 +374,27 @@ a {
     box-shadow 140ms ease;
 }
 
-.field input:hover {
+/* The native arrow sits inside the padding box, so the label text needs the
+   room a text input does not. */
+.field select {
+  padding-right: 34px;
+}
+
+.field input:hover,
+.field select:hover {
   border-color: var(--ink-faint);
 }
 
-.field input:focus {
+.field input:focus,
+.field select:focus {
   border-color: var(--focus);
   box-shadow: 0 0 0 3px var(--violet-soft);
+}
+
+.field select:disabled,
+.field input:disabled {
+  color: var(--ink-faint);
+  background: var(--paper-raised);
 }
 
 .field-hint {
@@ -889,6 +905,14 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
   overflow-wrap: anywhere;
 }
 
+/* Edit and Place share one cell. They wrap inside it instead of widening the
+   table, which is what keeps the row readable at phone widths. */
+.directory-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .directory-table tbody tr:last-child th,
 .directory-table tbody tr:last-child td {
   border-bottom: 0;
@@ -998,6 +1022,40 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
 .people-form-note {
   max-width: 64ch;
   margin: 16px 0 0;
+  line-height: 1.6;
+}
+
+/* Placement panel. It reuses .people-form's card, .field, .form-alert and
+   .people-form-actions so an identity edit and a placement read as one set of
+   controls. */
+
+.placement-panel {
+  margin: 22px 0 0;
+  padding: clamp(18px, 3vw, 26px);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--paper-raised);
+}
+
+.placement-form {
+  margin-top: 4px;
+}
+
+.placement-form .field {
+  max-width: 460px;
+}
+
+.placement-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.placement-empty {
+  max-width: 46ch;
+  margin: 0;
   line-height: 1.6;
 }
 

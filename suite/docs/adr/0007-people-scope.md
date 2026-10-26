@@ -222,6 +222,34 @@ tables, 67 with `tenant_id`, 66 RLS-enabled and 274 policies are unchanged, and 
 executable functions. `person.user_id` remains owner-written and out of band — the write
 path cannot set it, and no API route links a person to a user.
 
+## Amendment — T20 adds the placement path (M1 slice 5)
+
+The paragraph above lists the placement columns among the person columns that "stay
+owner-only". That was accurate for the identity write path and is superseded by
+[ADR 0009](0009-people-placement.md): `legal_entity_id` and `org_unit_id` now carry
+column-level `SELECT` and `UPDATE`, and nothing else. The person column privilege inventory
+moves from 22 to 26 (10 `SELECT` + 8 `INSERT` + 8 `UPDATE`), with neither placement column
+insertable — so a person created through the API still always starts unplaced, and the
+decision that paragraph describes is unchanged in kind, only in width. The same slice adds
+column-only `SELECT` on `legal_entity (id, name, code, deleted_at)` and
+`org_unit (id, name, legal_entity_id, deleted_at)` for the directory join and the options
+list, which is where the eight readable reference columns come from; the runtime table-grant
+allowlist stays at twelve rows, both reference tables keep `has_table_privilege` false for
+all four privileges, and neither has a write path.
+
+What this ADR decides is untouched by it. No migration was added — 12 migrations, 75 public
+base tables, 67 with `tenant_id`, 66 RLS-enabled and 274 policies are the same figures,
+re-derived from the live database — and no policy, helper, permissive rule or restrictive
+rule was widened, so scope still only narrows and the system-transaction fail-open residual
+still stands exactly as pinned by `tests/scope.test.ts`. One thing does change in character
+rather than in width: placement was a property only an operator could set, through
+`pnpm db:scope` or direct SQL, and it is now a member-facing action. `PATCH /v1/people/:id/placement`
+moves a colleague into or out of a member's visibility, and every one of its verdicts comes
+from `app.person_placement_in_scope(uuid, uuid)` — the same definer helper `scope_insert` and
+`scope_update` call — rather than from a predicate restated in the request layer, which is
+this ADR's central decision operating as designed rather than a new one. `person.user_id`
+still has no runtime grant and no API route.
+
 The Consequences bullet above that ends "... so all of these figures are unchanged by both and
 were re-derived from the live database to confirm that" describes the
 scope-administration and directory-read slices, and it stands for them. This slice is

@@ -19,6 +19,13 @@ export type PeopleListItem = {
   displayName: string;
   workEmail: string | null;
   phone: string | null;
+  // The placement ids come straight from the person row. The names are null
+  // when the person is unplaced and when the referenced row is soft-deleted, so
+  // a name never outlives the record it came from.
+  legalEntityId: string | null;
+  legalEntityName: string | null;
+  orgUnitId: string | null;
+  orgUnitName: string | null;
 };
 
 export type PeopleListResponse = {
@@ -28,9 +35,11 @@ export type PeopleListResponse = {
   pageSize: number;
 };
 
-// The only directory fields this milestone may write. Placement, status,
-// personal contact, demographics and the person-to-user link are deliberately
-// absent: the runtime holds no write privilege on them.
+// The only directory identity fields this milestone may write. Status,
+// personal_email, demographics and the person-to-user link are deliberately
+// absent: the runtime holds no write privilege on them. Placement is not here
+// either - it is a separate route with its own contract below, and the runtime
+// can only write it onto an existing row.
 export type PeopleCreateInput = {
   firstName: string;
   lastName?: string | null;
@@ -49,4 +58,36 @@ export type PeopleUpdateInput = {
   employeeCode?: string | null;
   workEmail?: string | null;
   phone?: string | null;
+};
+
+// Placement is always a whole statement about where a person sits: both keys
+// are required, and a null clears that half. Both null removes the placement.
+// This is a directory attribute only - it creates no employment record.
+export type PeoplePlacementInput = {
+  legalEntityId: string | null;
+  orgUnitId: string | null;
+};
+
+export type PeoplePlacementOptionEntity = {
+  id: string;
+  name: string;
+  code: string;
+  // False when the member may place org units inside this entity but may not
+  // place a person on the entity alone.
+  placeable: boolean;
+};
+
+export type PeoplePlacementOptionOrgUnit = {
+  id: string;
+  name: string;
+  legalEntityId: string;
+  placeable: boolean;
+};
+
+export type PeoplePlacementOptions = {
+  // True only for a tenant-wide member: removing a placement entirely leaves a
+  // person no scoped member can see or maintain.
+  canUnplace: boolean;
+  legalEntities: PeoplePlacementOptionEntity[];
+  orgUnits: PeoplePlacementOptionOrgUnit[];
 };

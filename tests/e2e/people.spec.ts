@@ -77,6 +77,15 @@ test.beforeAll(async () => {
     const fixtures: AccessFixtures = await createAccessFixtures(owner);
     const passwordHash = await hashPassword(syntheticPassword);
 
+    // The directory's legal entity already exists from the shared fixtures; the
+    // one org unit inside it is written owner-side, because legal entity and
+    // org unit administration has no route in this milestone.
+    await owner.query(
+      `insert into org_unit (tenant_id, legal_entity_id, parent_id, name, kind)
+       values ($1, $2, null, 'E2E placement unit', 'department')`,
+      [fixtures.a.tenantId, fixtures.a.legalEntityId],
+    );
+
     for (const fixture of [fixtures.a, fixtures.b]) {
       await owner.query(
         `update app_user set password_hash = $2 where id = $1 and status = 'active'`,
@@ -190,7 +199,7 @@ test('signs in, searches, creates and edits the directory, gates People and pers
   const createForm = page.getByRole('form', { name: 'Add a person' });
   await expect(createForm.locator('.field')).toHaveCount(6);
   await expect(page.locator('#people-form-firstName')).toBeEnabled();
-  await expect(page.locator('.people-form-note')).toContainText('legal entity');
+  await expect(page.locator('.people-form-note')).toContainText('use Place afterwards');
 
   // The panel is a two-column grid, so it has to fold without spilling over.
   for (const width of [390, 768, 1440]) {
@@ -229,6 +238,9 @@ test('signs in, searches, creates and edits the directory, gates People and pers
   await expect(editForm).toBeVisible();
   await expect(page.locator('#people-form-firstName')).toHaveValue('Nadia');
   await expect(page.locator('#people-form-employeeCode')).toHaveValue('E2E-001');
+  await expect(page.locator('.people-form-note')).toContainText(
+    'Use Place to change the legal entity or org unit',
+  );
   await page.locator('#people-form-phone').fill('+1 555 0901');
   await page.getByRole('button', { name: 'Save changes' }).click();
   await expect(saved).toHaveText('Person updated.');
@@ -257,6 +269,72 @@ test('signs in, searches, creates and edits the directory, gates People and pers
   await search.fill('');
   await page.getByRole('button', { name: 'Search', exact: true }).click();
   await expect(liveCount).toHaveText('5 people');
+
+  // Placement: this row is put on the org unit inside the workspace legal
+  // entity, checked across a reload, and removed again.
+  await expect(
+    directory.getByRole('columnheader', { name: 'Placement' }),
+  ).toBeVisible();
+  const nadiaRow = directory.getByRole('row', { name: /Nadia Kaur/ });
+  const nadiaPlacement = nadiaRow.locator('td').nth(3);
+  await expect(nadiaPlacement).toHaveText('—');
+
+  await directory.getByRole('button', { name: 'Place Nadia Kaur' }).click();
+  const panel = page.locator('.placement-panel');
+  await expect(panel).toHaveCount(1);
+  await expect(panel.getByRole('heading', { name: 'Place Nadia Kaur' })).toBeVisible();
+  // The choices come from the server, so the panel only offers Save once they
+  // have arrived: Unplaced for a workspace-wide member, the entity, and its unit.
+  const placementSelect = page.locator('#people-placement');
+  await expect(placementSelect).toBeEnabled();
+  const placementLabels = await placementSelect.evaluate((element) =>
+    Array.from((element as HTMLSelectElement).options).map((option) => option.text),
+  );
+  expect(placementLabels).toEqual(['Unplaced', 'Legal a', 'E2E placement unit']);
+  const placementGroups = await placementSelect.evaluate((element) =>
+    Array.from(element.querySelectorAll('optgroup')).map((group) => group.label),
+  );
+  expect(placementGroups).toEqual(['Legal a']);
+  await expect(panel.locator('.fine-print')).toContainText(
+    'not an employment record',
+  );
+  await expect(page.getByRole('button', { name: 'Save placement' })).toBeDisabled();
+
+  // The panel has to fold on a phone like any other form on this screen.
+  for (const width of [390, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await noHorizontalOverflow(page);
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+
+  await placementSelect.selectOption({ label: 'E2E placement unit' });
+  await page.getByRole('button', { name: 'Save placement' }).click();
+  await expect(saved).toHaveText('Placement updated.');
+  await expect(panel).toHaveCount(0);
+  await expect(nadiaPlacement).toHaveText('Legal a · E2E placement unit');
+
+  // The placement is the row, not component state: it survives a reload.
+  await page.reload();
+  await expect(
+    directory.getByRole('rowheader', { name: 'Nadia Kaur', exact: true }),
+  ).toBeVisible();
+  await expect(nadiaPlacement).toHaveText('Legal a · E2E placement unit');
+
+  await directory.getByRole('button', { name: 'Place Nadia Kaur' }).click();
+  await expect(placementSelect).toBeEnabled();
+  // The panel opens on the stored placement, so there is nothing to save until
+  // the caller changes it.
+  const selectedLabel = await placementSelect.evaluate(
+    (element) =>
+      (element as HTMLSelectElement).options[(element as HTMLSelectElement).selectedIndex]?.text ??
+      '',
+  );
+  expect(selectedLabel).toBe('E2E placement unit');
+  await expect(page.getByRole('button', { name: 'Save placement' })).toBeDisabled();
+  await placementSelect.selectOption({ label: 'Unplaced' });
+  await page.getByRole('button', { name: 'Save placement' }).click();
+  await expect(saved).toHaveText('Placement updated.');
+  await expect(nadiaPlacement).toHaveText('—');
 
   const nav = page.getByRole('navigation', { name: 'Modules' });
   await expect(nav.getByRole('link', { name: /People/ })).toHaveAttribute(

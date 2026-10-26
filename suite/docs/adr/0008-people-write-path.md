@@ -1,6 +1,7 @@
 # ADR 0008 — People writes are identity-only, CSRF-verified and read back in the same transaction
 
-Status: accepted · October 2026 · M1 slice 4 (T19)
+Status: accepted · October 2026 · M1 slice 4 (T19) · clauses 1, 5, 6, 7 and 12 carry amendment
+notes from [ADR 0009](0009-people-placement.md), which added the placement route in the next slice
 
 ## Context
 
@@ -37,7 +38,10 @@ Three constraints shape the design:
    `deleted_at`, the timestamps, the import columns, personal email, date of birth, gender,
    dates of joining and exit, designation, manager, and location are not writable by any
    member through any route. There is no delete, no restore, no soft-delete, no bulk edit
-   and no import in this slice.
+   and no import in this slice. *(Amended by ADR 0009: `legal_entity_id` and `org_unit_id`
+   became writable in the next slice, through their own route and contract rather than through
+   these two. Everything else in this sentence is still exactly true, including on the
+   placement route, which cannot touch an identity field.)*
 2. **The body is a closed object.** A non-object, an array, an empty object, or any key
    outside the six fields — including `id`, `status`, `legalEntityId`, `orgUnitId`,
    `userId`, `personalEmail` and `dateOfBirth` — is a `400 INVALID_BODY` that echoes none of
@@ -67,7 +71,10 @@ Three constraints shape the design:
    insert refused by the `scope_insert` policy itself. The typed answer exists so the UI can
    say plainly that only a workspace-wide role can add an unplaced person, instead of
    reporting an internal failure. Placement is not editable anywhere in this build, and the
-   copy must not imply that an operator could go and place someone.
+   copy must not imply that an operator could go and place someone. *(Amended by
+   [`0009-people-placement.md`](0009-people-placement.md): placement became a separate route in the
+   next slice, and the copy now points at it. The rule this sentence protects — that a create never
+   places anybody — still holds, because the `INSERT` column list still has no placement column.)*
 6. **`INSERT ... RETURNING` is refused on `person`, and the route is built around it.** The
    restrictive `scope_read` policy is `using (app.person_visible(id))`, and
    `person_visible(id)` re-queries `person`. A `RETURNING` list is filtered by the SELECT
@@ -95,7 +102,10 @@ Three constraints shape the design:
    the audit row rolled back — instead of inventing a `201`. `id` is therefore in the `INSERT`
    grant list and is never taken from the client. Because the same transaction reads the row
    back, no second transaction and no extra `SELECT` privilege is needed, and the read still
-   goes through `scope_read` rather than past it.
+   goes through `scope_read` rather than past it. *(Amended by ADR 0009: the shared read-back is
+   now the eleven-key directory select, and the `UPDATE` paths lost their `RETURNING` too, because
+   a `RETURNING` list cannot carry a joined column. The `INSERT ... RETURNING` refusal this clause
+   records is unchanged and is still proven by `tests/scope.test.ts`.)*
 7. **Column privileges follow the fields, column by column.** `saas_runtime` now holds 8
    `SELECT` (the seven directory fields plus `deleted_at`), 8 `INSERT` (`id`, `tenant_id` and
    the six identity fields) and 6 `UPDATE` (the six identity fields) — 22 column privileges
@@ -107,6 +117,10 @@ Three constraints shape the design:
    route can soft-delete through the update path. `tests/schema-inventory.test.ts` pins the
    full inventory as a list and as counts, plus the `id` insertable-not-updatable and
    no-`DELETE` facts, so the next grant change has to be a decision rather than a slip.
+   *(Amended by ADR 0009: the inventory is now 10 `SELECT`, 8 `INSERT` and 8 `UPDATE` — 26 column
+   privileges — because both placement columns joined `SELECT` and `UPDATE` and neither joined
+   `INSERT`, and the same role gained column-only `SELECT` on the two reference tables the
+   directory joins. No table-level privilege and no `DELETE` was added, in either slice.)*
 8. **Object misses answer one way.** An update reads the target row by `id` with
    `deleted_at is null` inside the gated transaction, and answers `404 PERSON_NOT_FOUND`
    whether the id is unknown, malformed, soft-deleted, in another tenant or outside the
@@ -142,7 +156,11 @@ Three constraints shape the design:
     disclosure surface for no forensic gain. Because the append is in the same transaction as
     the write, an audit failure rolls the write back and the client receives a sanitized `500
     INTERNAL_ERROR` — proven by revoking `INSERT` on `audit_event` for the runtime role and
-    checking that no person row and no change to the target row survive.
+    checking that no person row and no change to the target row survive. *(Amended by ADR 0009:
+    `person.placement.changed` does carry the previous placement, as ids only, because the old pair
+    is nowhere else in the database once the update commits. Field names only remains the rule for
+    `person.created` and `person.updated`, and no slice puts a value, name or contact detail into
+    audit metadata.)*
 13. **Scope denials and object misses write no audit row.** `authorization.denied` is written
     by the gate when entitlement or role fails, and it keeps doing that. A `SCOPE_DENIED` is
     different: the verdict comes from a database policy evaluated inside a transaction that
@@ -199,7 +217,10 @@ Three constraints shape the design:
   than a table grant by every measure that matters: no `DELETE`, no `status`, no placement,
   no `user_id`, no timestamps, no personal or demographic column, and RLS unchanged on both
   sides. Any widening of this list should be a new ADR, not an edit to
-  `packages/db/sql/runtime-grants.sql`.
+  `packages/db/sql/runtime-grants.sql`. *(That is what happened next: ADR 0009 moved the count to
+  26 by adding the two placement columns to `SELECT` and `UPDATE` and to nothing else, and added
+  column-only reads on the two reference tables the directory joins. The `DELETE`, `status`,
+  `user_id`, timestamp and demographic statements above all remain true as written.)*
 - Scope remains enforced but invisible. `/v1/context` still returns entitlements and
   permissions only, so a member cannot tell from the UI why a create was refused beyond the
   copy this slice provides; the honest message says what to do rather than pretending to show
@@ -213,3 +234,8 @@ change to `/v1/context`, no scope labels, no bulk edit, no import, and no change
 export. There is no optimistic locking, no partial-success batch, no rate limit on the write
 routes and no field-level redaction audit. The write path has never run in CI: the GitHub
 account is locked for billing and no job has executed a step.
+
+*Of that list, [ADR 0009](0009-people-placement.md) closed one item in the next slice — the
+placement editor, over `legal_entity_id` and `org_unit_id` alone, on an existing row. Everything
+else above is still not built, including legal entity and org unit administration, which is why
+the placement panel can only offer what already exists.*

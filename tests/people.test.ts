@@ -161,6 +161,16 @@ async function denialRows(tenantId: string): Promise<DenialRow[]> {
   return rows.filter((row) => row.action === 'authorization.denied');
 }
 
+async function legalEntityName(id: string): Promise<string> {
+  return withOwner(async (client) => {
+    const result = await client.query<{ name: string }>(
+      'select name from legal_entity where id = $1',
+      [id],
+    );
+    return one(result.rows).name;
+  });
+}
+
 type TestServer = ReturnType<typeof createServer>;
 
 async function withApp<T>(fn: (app: TestServer) => Promise<T>): Promise<T> {
@@ -281,6 +291,8 @@ describe('People directory read path', () => {
         ownerVisibleIds(),
       );
 
+      const placedEntityName = await legalEntityName(fx().a.legalEntityId);
+
       for (const item of body.items) {
         expect(Object.keys(item).sort()).toEqual([
           'displayName',
@@ -288,9 +300,20 @@ describe('People directory read path', () => {
           'firstName',
           'id',
           'lastName',
+          'legalEntityId',
+          'legalEntityName',
+          'orgUnitId',
+          'orgUnitName',
           'phone',
           'workEmail',
         ]);
+        // A placement name never appears without the id it came from, and no
+        // fixture row in this view carries an org unit.
+        if (item.legalEntityId === null) {
+          expect(item.legalEntityName).toBeNull();
+        }
+        expect(item.orgUnitId).toBeNull();
+        expect(item.orgUnitName).toBeNull();
       }
 
       expect(body.items.find((item) => item.employeeCode === 'EXP-001')).toEqual(
@@ -302,6 +325,10 @@ describe('People directory read path', () => {
           displayName: 'Ada, "Countess"',
           workEmail: exportPerson(0).workEmail,
           phone: '+1 555 0100',
+          legalEntityId: fx().a.legalEntityId,
+          legalEntityName: placedEntityName,
+          orgUnitId: null,
+          orgUnitName: null,
         },
       );
 
@@ -314,7 +341,6 @@ describe('People directory read path', () => {
         exportPerson(0).dateOfBirth,
         exportPerson(0).gender,
         exportPerson(0).designation,
-        exportPerson(0).legalEntityId,
       ];
       for (const value of disclosures) {
         if (value) {
@@ -334,11 +360,15 @@ describe('People directory read path', () => {
         'designation',
         'employment_type',
         'employmentType',
-        'legal_entity_id',
-        'legalEntityId',
       ]) {
         expect(result.body).not.toContain(field);
       }
+
+      // A placement name belongs to the tenant that owns the reference row: the
+      // other workspace's legal entity never appears in this response.
+      expect(result.body).not.toContain(
+        await legalEntityName(fx().b.legalEntityId),
+      );
     });
   });
 

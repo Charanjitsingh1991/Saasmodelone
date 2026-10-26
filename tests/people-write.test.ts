@@ -42,6 +42,10 @@ const ITEM_KEYS = [
   'firstName',
   'id',
   'lastName',
+  'legalEntityId',
+  'legalEntityName',
+  'orgUnitId',
+  'orgUnitName',
   'phone',
   'workEmail',
 ];
@@ -564,6 +568,12 @@ describe('People write path', () => {
         displayName: 'Rear Admiral Grace Hopper',
         workEmail,
         phone: '+1 555 0111',
+        // A create writes identity only: the INSERT grant has no placement
+        // column, so every new person starts unplaced.
+        legalEntityId: null,
+        legalEntityName: null,
+        orgUnitId: null,
+        orgUnitName: null,
       });
 
       const stored = await ownerPerson(response.item.id);
@@ -884,6 +894,12 @@ describe('People write path', () => {
         displayName: 'Ada Lovelace, Countess',
         employeeCode: code,
         phone: '+1 555 0201',
+        // An identity update is not a placement write: the pair is untouched and
+        // still reads back as it was stored.
+        legalEntityId: null,
+        legalEntityName: null,
+        orgUnitId: null,
+        orgUnitName: null,
       });
 
       const afterRow = await ownerPerson(created.item.id);
@@ -897,6 +913,7 @@ describe('People write path', () => {
       expect(afterRow).toMatchObject({
         status: beforeRow?.status,
         legal_entity_id: null,
+        org_unit_id: null,
         user_id: null,
         personal_email: null,
       });

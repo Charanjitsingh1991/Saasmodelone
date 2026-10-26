@@ -979,7 +979,7 @@ describe('people scope schema and privileges', () => {
          order by 1
       `);
       // Distinct columns only; tests/schema-inventory.test.ts pins the exact
-      // 8 SELECT + 8 INSERT + 6 UPDATE privilege inventory.
+      // 10 SELECT + 8 INSERT + 8 UPDATE privilege inventory.
       expect(personColumns.rows.map((row) => row.column_name)).toEqual([
         'deleted_at',
         'display_name',
@@ -987,10 +987,34 @@ describe('people scope schema and privileges', () => {
         'first_name',
         'id',
         'last_name',
+        'legal_entity_id',
+        'org_unit_id',
         'phone',
         'tenant_id',
         'work_email',
       ]);
+
+      // The reference tables hold exactly the four columns the directory join
+      // and the placement option list need, and nothing else.
+      for (const [table, columns] of [
+        ['legal_entity', ['code', 'deleted_at', 'id', 'name']],
+        ['org_unit', ['deleted_at', 'id', 'legal_entity_id', 'name']],
+      ] as const) {
+        const reference = await client.query<{ column_name: string }>(`
+          select distinct column_name
+            from information_schema.column_privileges
+           where grantee = 'saas_runtime' and table_name = $1
+           order by 1
+        `, [table]);
+        expect(reference.rows.map((row) => row.column_name)).toEqual(columns);
+
+        const tablePrivilege = await client.query<{ allowed: boolean }>(`
+          select p as privilege,
+                 has_table_privilege('saas_runtime', 'public.' || $1, p) as allowed
+            from unnest(array['SELECT','INSERT','UPDATE','DELETE']) p
+        `, [table]);
+        expect(tablePrivilege.rows.every((row) => !row.allowed)).toBe(true);
+      }
     });
   });
 
@@ -1391,12 +1415,13 @@ describe('people scope write semantics', () => {
     ).toBe(false);
   });
 
-  test('pins the person write policies against the identity column grants', async () => {
+  test('pins the person write policies against the identity and placement column grants', async () => {
     const s = scope();
     // T19 gives the runtime role column-level INSERT and UPDATE on the person
-    // identity columns only. Table-level DML is still refused, so the write
-    // boundary here is RLS, not a grant: the 42501 below names the
-    // scope_insert policy rather than "permission denied for table person".
+    // identity columns; T20 extends UPDATE to the two placement columns.
+    // Table-level DML is still refused, so the write boundary here is RLS, not
+    // a grant: the 42501 below names the scope_insert policy rather than
+    // "permission denied for table person".
     const privileges = await withOwner(async (client) => {
       const result = await client.query<{ privilege: string; allowed: boolean }>(`
         select p as privilege,
@@ -1444,16 +1469,76 @@ describe('people scope write semantics', () => {
     });
     expect(created).toBe('Wide Create');
 
-    // Placement stays out of reach: the identity grants do not extend to it, so
-    // even a tenant-wide member cannot move a row across the org.
-    const placementError = await expectError(
+    // Placement is now real runtime DML: the UPDATE grant reaches
+    // legal_entity_id and org_unit_id, so an in-scope move writes and an
+    // out-of-scope move is refused by the policy, not by the grant. The
+    // statement carries no RETURNING for the same reason as the insert above
+    // (ADR 0008); the row is read by the next statement in the transaction.
+    const movedByWide = await withMember(s.tenantA, s.managerWide, async (client) => {
+      const updated = await client.query(
+        `update person set legal_entity_id = $1, org_unit_id = $2
+          where id = $3 and deleted_at is null`,
+        [s.entity2, s.unitSibling, s.personEntity1],
+      );
+      const readBack = await client.query<{
+        legal_entity_id: string;
+        org_unit_id: string;
+      }>(
+        `select legal_entity_id, org_unit_id from person where id = $1`,
+        [s.personEntity1],
+      );
+      return { rowCount: updated.rowCount, placement: one(readBack.rows) };
+    });
+    expect(movedByWide).toEqual({
+      rowCount: 1,
+      placement: { legal_entity_id: s.entity2, org_unit_id: s.unitSibling },
+    });
+
+    // The same statement from an entity-scoped member inside their entity
+    // succeeds, and moving that row to another entity is refused with the
+    // policy named - the grant covers the column, the policy decides the row.
+    const movedByScoped = await withMember(s.tenantA, s.managerEntity, async (client) => {
+      const updated = await client.query(
+        `update person set legal_entity_id = $1, org_unit_id = $2
+          where id = $3 and deleted_at is null`,
+        [s.entity1, s.unitMid, s.personEntity1],
+      );
+      return updated.rowCount;
+    });
+    expect(movedByScoped).toBe(1);
+
+    const movedOutOfScope = await expectError(
       s.tenantA,
-      s.managerWide,
-      `update person set legal_entity_id = $1 where id = $2`,
-      [s.entity1, s.personEntity1],
+      s.managerEntity,
+      `update person set legal_entity_id = $1, org_unit_id = $2
+        where id = $3 and deleted_at is null`,
+      [s.entity2, null, s.personEntity1],
     );
-    expect(placementError.code).toBe('42501');
-    expect(placementError.message).not.toContain('row-level security');
+    expect(movedOutOfScope.code).toBe('42501');
+    expect(movedOutOfScope.message).toContain('row-level security');
+    expect(movedOutOfScope.message).toContain('scope_update');
+
+    // An org-unit-scoped member can move a person within their subtree but not
+    // onto the bare legal entity: a null unit never matches an org_unit scope.
+    const movedToUnit = await withMember(s.tenantA, s.managerUnit, async (client) => {
+      const updated = await client.query(
+        `update person set legal_entity_id = $1, org_unit_id = $2
+          where id = $3 and deleted_at is null`,
+        [s.entity1, s.unitMid, s.personLeaf],
+      );
+      return updated.rowCount;
+    });
+    expect(movedToUnit).toBe(1);
+
+    const movedToEntityOnly = await expectError(
+      s.tenantA,
+      s.managerUnit,
+      `update person set legal_entity_id = $1, org_unit_id = $2
+        where id = $3 and deleted_at is null`,
+      [s.entity1, null, s.personLeaf],
+    );
+    expect(movedToEntityOnly.code).toBe('42501');
+    expect(movedToEntityOnly.message).toContain('scope_update');
 
     const placement = await helperBoolean(
       s.tenantA,

@@ -3,6 +3,8 @@ import type {
   PeopleCreateInput,
   PeopleListItem,
   PeopleListResponse,
+  PeoplePlacementInput,
+  PeoplePlacementOptions,
   PeopleUpdateInput,
   SessionResponse,
 } from '@saasmodels/contracts';
@@ -126,6 +128,18 @@ export const api = {
 
   updatePerson: (id: string, input: PeopleUpdateInput) =>
     request<PeopleListItem>(`/v1/people/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: writeHeaders(),
+      body: JSON.stringify(input),
+    }),
+
+  // The placement choice list. A GET, so no CSRF header; the server gates it on
+  // people.write and filters every row by the member's own scope.
+  placementOptions: () =>
+    request<PeoplePlacementOptions>('/v1/people/placement-options'),
+
+  updatePlacement: (id: string, input: PeoplePlacementInput) =>
+    request<PeopleListItem>(`/v1/people/${encodeURIComponent(id)}/placement`, {
       method: 'PATCH',
       headers: writeHeaders(),
       body: JSON.stringify(input),

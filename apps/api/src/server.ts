@@ -16,6 +16,8 @@ import {
   type ContextResponse,
   type PeopleListItem,
   type PeopleListResponse,
+  type PeoplePlacementInput,
+  type PeoplePlacementOptions,
   type SessionResponse,
 } from '@saasmodels/contracts';
 import Fastify, {
@@ -103,6 +105,10 @@ type PeopleListRow = {
   display_name: string;
   work_email: string | null;
   phone: string | null;
+  legal_entity_id: string | null;
+  legal_entity_name: string | null;
+  org_unit_id: string | null;
+  org_unit_name: string | null;
 };
 
 type AccessErrorBody = {
@@ -295,9 +301,12 @@ function validateExportBatchSize(value: number): number {
   return value;
 }
 
-// The person columns this milestone may write, in the order the contract names
-// them. Placement, status, personal email, demographics and the user link are
-// absent because the runtime holds no write privilege on them.
+// The person identity columns this milestone may write, in the order the
+// contract names them. Status, personal email, demographics and the user link
+// are absent because the runtime holds no write privilege on them. Placement is
+// absent too: it is a separate route with its own contract below, and the
+// runtime INSERT list has no placement column, so a person is only ever created
+// unplaced and placed afterwards.
 const PEOPLE_WRITE_FIELDS = [
   'firstName',
   'lastName',
@@ -445,19 +454,84 @@ function peopleItemFromRow(row: PeopleListRow): PeopleListItem {
     displayName: row.display_name,
     workEmail: row.work_email,
     phone: row.phone,
+    legalEntityId: row.legal_entity_id,
+    legalEntityName: row.legal_entity_name,
+    orgUnitId: row.org_unit_id,
+    orgUnitName: row.org_unit_name,
   };
 }
 
-const DIRECTORY_SELECT_COLUMNS = `id,
-                    employee_code,
-                    first_name,
-                    last_name,
-                    display_name,
-                    work_email::text as work_email,
-                    phone`;
+// One shared read behind every directory item response - list, create, identity
+// update and placement - so all four answer with the same eleven keys. The
+// placement ids come from the person row; the names come from the reference
+// tables and are null when the person is unplaced or the referenced row is
+// soft-deleted, so a retired legal entity or org unit never keeps a name in the
+// directory while its id stays visible on the person.
+const DIRECTORY_SELECT = `select p.id,
+                    p.employee_code,
+                    p.first_name,
+                    p.last_name,
+                    p.display_name,
+                    p.work_email::text as work_email,
+                    p.phone,
+                    p.legal_entity_id,
+                    le.name as legal_entity_name,
+                    p.org_unit_id,
+                    ou.name as org_unit_name`;
+
+// The joins address a reference row by its globally unique id and never filter
+// on tenant_id: the composite (tenant_id, id) foreign key from person plus each
+// reference table's tenant_isolation policy make a cross-tenant reference
+// unreadable. ADR 0009 records the reasoning.
+const DIRECTORY_FROM = `from person p
+          left join legal_entity le on le.id = p.legal_entity_id and le.deleted_at is null
+          left join org_unit ou on ou.id = p.org_unit_id and ou.deleted_at is null`;
 
 const UUID_TEXT_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const PEOPLE_PLACEMENT_FIELDS = ['legalEntityId', 'orgUnitId'] as const;
+
+// A placement is always written as one pair, so the body must carry exactly
+// these two keys and each is a UUID or null. There is no "omit it to keep it"
+// here: an absent or unknown key, a non-string id, an empty object and an array
+// are all one INVALID_BODY.
+function parsePeoplePlacement(body: unknown): PeoplePlacementInput {
+  const object = peopleWriteObject(body);
+
+  const keys = Object.keys(object).sort();
+  if (
+    keys.length !== PEOPLE_PLACEMENT_FIELDS.length ||
+    keys.some((key, index) => key !== PEOPLE_PLACEMENT_FIELDS[index])
+  ) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+
+  const ids: Record<(typeof PEOPLE_PLACEMENT_FIELDS)[number], string | null> = {
+    legalEntityId: null,
+    orgUnitId: null,
+  };
+  for (const field of PEOPLE_PLACEMENT_FIELDS) {
+    const raw = object[field];
+    if (raw === null) {
+      continue;
+    }
+    if (typeof raw !== 'string' || !UUID_TEXT_PATTERN.test(raw)) {
+      throw new ApiError(400, 'INVALID_BODY');
+    }
+    // Lowercased so a comparison against the value the database reads back is
+    // one comparison, not two spellings of the same id.
+    ids[field] = raw.toLowerCase();
+  }
+
+  // An org unit is always placed under its own legal entity, so a unit with no
+  // entity names no placement this route can store.
+  if (ids.legalEntityId === null && ids.orgUnitId !== null) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  return ids;
+}
+
 function validateRateLimit(options: RateLimitOptions, name: string): RateLimitOptions {
   if (
     !Number.isInteger(options.max) ||
@@ -798,7 +872,7 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
           gate: { module: 'people', operation: 'read' },
         },
         async (client) => {
-          const clauses = ['deleted_at is null'];
+          const clauses = ['p.deleted_at is null'];
           const filterValues: string[] = [];
           if (searchTerm !== '') {
             filterValues.push(searchTerm);
@@ -806,42 +880,28 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
             // strpos over the lowered columns is a literal match, so a search
             // for "%" or "_" cannot behave like a LIKE wildcard.
             clauses.push(
-              `(strpos(lower(display_name), lower(${needle})) > 0
-                 or strpos(lower(coalesce(employee_code, '')), lower(${needle})) > 0
-                 or strpos(lower(coalesce(work_email::text, '')), lower(${needle})) > 0)`,
+              `(strpos(lower(p.display_name), lower(${needle})) > 0
+                 or strpos(lower(coalesce(p.employee_code, '')), lower(${needle})) > 0
+                 or strpos(lower(coalesce(p.work_email::text, '')), lower(${needle})) > 0)`,
             );
           }
           const where = clauses.join(' and ');
           const limitIndex = filterValues.length + 1;
 
           const matching = await client.query<{ total: string }>(
-            `select count(*) as total from person where ${where}`,
+            `select count(*) as total from person p where ${where}`,
             filterValues,
           );
           const pageRows = await client.query<PeopleListRow>(
-            `select id,
-                    employee_code,
-                    first_name,
-                    last_name,
-                    display_name,
-                    work_email::text as work_email,
-                    phone
-               from person
+            `${DIRECTORY_SELECT}
+              ${DIRECTORY_FROM}
               where ${where}
-              order by lower(display_name), id
+              order by lower(p.display_name), p.id
               limit $${limitIndex} offset $${limitIndex + 1}`,
             [...filterValues, pageSize, (page - 1) * pageSize],
           );
 
-          const items: PeopleListItem[] = pageRows.rows.map((row) => ({
-            id: row.id,
-            employeeCode: row.employee_code,
-            firstName: row.first_name,
-            lastName: row.last_name,
-            displayName: row.display_name,
-            workEmail: row.work_email,
-            phone: row.phone,
-          }));
+          const items: PeopleListItem[] = pageRows.rows.map(peopleItemFromRow);
 
           const body: PeopleListResponse = {
             items,
@@ -931,9 +991,9 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
           }
 
           const created = await client.query<PeopleListRow>(
-            `select ${DIRECTORY_SELECT_COLUMNS}
-               from person
-              where id = $1 and deleted_at is null`,
+            `${DIRECTORY_SELECT}
+              ${DIRECTORY_FROM}
+              where p.id = $1 and p.deleted_at is null`,
             [id],
           );
           const row = created.rows[0];
@@ -997,9 +1057,9 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
           const parsed = parsePeopleWrite(peopleWriteObject(request.body), 'update');
 
           const current = await client.query<PeopleListRow>(
-            `select ${DIRECTORY_SELECT_COLUMNS}
-               from person
-              where id = $1 and deleted_at is null`,
+            `${DIRECTORY_SELECT}
+              ${DIRECTORY_FROM}
+              where p.id = $1 and p.deleted_at is null`,
             [personId],
           );
           const row = current.rows[0];
@@ -1051,11 +1111,10 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
 
           let updated;
           try {
-            updated = await client.query<PeopleListRow>(
+            updated = await client.query(
               `update person
                   set ${assignments.join(', ')}
-                where id = $${setValues.length + 1} and deleted_at is null
-                returning ${DIRECTORY_SELECT_COLUMNS}`,
+                where id = $${setValues.length + 1} and deleted_at is null`,
               [...setValues, personId],
             );
           } catch (error) {
@@ -1074,7 +1133,21 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
             }
             throw new ApiError(409, 'PERSON_CONFLICT');
           }
-          const updatedRow = updated.rows[0];
+          // One row or none: anything else is an invariant break and the whole
+          // transaction rolls back with the audit row.
+          if (updated.rowCount !== 1) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          // UPDATE ... RETURNING cannot carry the joined placement names, so the
+          // response is read back with the same select the list uses.
+          const written = await client.query<PeopleListRow>(
+            `${DIRECTORY_SELECT}
+              ${DIRECTORY_FROM}
+              where p.id = $1 and p.deleted_at is null`,
+            [personId],
+          );
+          const updatedRow = written.rows[0];
           if (!updatedRow) {
             throw new ApiError(500, 'INTERNAL_ERROR');
           }
@@ -1091,6 +1164,242 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
           });
 
           return peopleItemFromRow(updatedRow);
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  app.get('/v1/people/placement-options', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+
+    try {
+      // Only a member who may write a placement has any reason to ask for these
+      // lists, so a read-only manager is refused exactly as on the write routes.
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'people', operation: 'write' },
+        },
+        async (client) => {
+          // Every row is decided by app.person_placement_in_scope - the same
+          // security-definer helper the write policies call. No scope rule is
+          // restated in TypeScript, and no tenant_id predicate appears: the
+          // transaction sets app.tenant_id, so each reference table's
+          // tenant_isolation policy is the tenant boundary.
+          const unplace = await client.query<{ allowed: boolean }>(
+            'select app.person_placement_in_scope(null, null) as allowed',
+          );
+
+          // An entity is offered when the member may place directly on it, or
+          // when it owns at least one offerable org unit. That second branch is
+          // what lets an org-unit-scoped member group their units under an
+          // entity they cannot place on; placeable tells the UI so.
+          const entities = await client.query<{
+            id: string;
+            name: string;
+            code: string;
+            placeable: boolean;
+          }>(
+            `select le.id,
+                    le.name,
+                    le.code,
+                    app.person_placement_in_scope(le.id, null) as placeable
+               from legal_entity le
+              where le.deleted_at is null
+                and (
+                     app.person_placement_in_scope(le.id, null)
+                     or exists (
+                        select 1
+                          from org_unit ou
+                         where ou.legal_entity_id = le.id
+                           and ou.deleted_at is null
+                           and app.person_placement_in_scope(ou.legal_entity_id, ou.id)
+                     )
+                   )
+              order by le.name, le.id`,
+          );
+
+          // The inner join is what drops a unit with no legal entity and a unit
+          // whose entity is retired. A unit here is always placeable: the
+          // helper said so, and the pair it checks is the one the write stores.
+          const units = await client.query<{
+            id: string;
+            name: string;
+            legal_entity_id: string;
+          }>(
+            `select ou.id,
+                    ou.name,
+                    ou.legal_entity_id
+               from org_unit ou
+               join legal_entity le on le.id = ou.legal_entity_id
+                                   and le.deleted_at is null
+              where ou.deleted_at is null
+                and app.person_placement_in_scope(ou.legal_entity_id, ou.id)
+              order by ou.name, ou.id`,
+          );
+
+          const body: PeoplePlacementOptions = {
+            canUnplace: unplace.rows[0]?.allowed === true,
+            legalEntities: entities.rows.map((row) => ({
+              id: row.id,
+              name: row.name,
+              code: row.code,
+              placeable: row.placeable,
+            })),
+            orgUnits: units.rows.map((row) => ({
+              id: row.id,
+              name: row.name,
+              legalEntityId: row.legal_entity_id,
+              placeable: true,
+            })),
+          };
+          return body;
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  app.patch('/v1/people/:id/placement', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+    requireCsrfToken(session, request);
+
+    const personId = (request.params as { id?: unknown }).id;
+
+    try {
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'people', operation: 'write' },
+        },
+        async (client) => {
+          // Entitlement and role settle before any of this runs, so a denied
+          // caller is denied the same way whatever the id looks like and no
+          // malformed UUID reaches the database.
+          if (typeof personId !== 'string' || !UUID_TEXT_PATTERN.test(personId)) {
+            throw new ApiError(404, 'PERSON_NOT_FOUND');
+          }
+
+          const placement = parsePeoplePlacement(request.body);
+
+          // The read is the scope test: RLS leaves a person this member may not
+          // see - unknown, another tenant, soft-deleted or out of scope -
+          // invisible, and all four answer as one 404.
+          const personRows = await client.query<PeopleListRow>(
+            `${DIRECTORY_SELECT}
+              ${DIRECTORY_FROM}
+              where p.id = $1 and p.deleted_at is null`,
+            [personId],
+          );
+          const personRow = personRows.rows[0];
+          if (!personRow) {
+            throw new ApiError(404, 'PERSON_NOT_FOUND');
+          }
+          const currentItem = peopleItemFromRow(personRow);
+
+          if (placement.legalEntityId !== null) {
+            const entity = await client.query<{ id: string }>(
+              `select le.id
+                 from legal_entity le
+                where le.id = $1 and le.deleted_at is null`,
+              [placement.legalEntityId],
+            );
+            if (!entity.rows[0]) {
+              throw new ApiError(404, 'PLACEMENT_NOT_FOUND');
+            }
+          }
+
+          if (placement.orgUnitId !== null) {
+            const unit = await client.query<{ legal_entity_id: string }>(
+              `select ou.legal_entity_id
+                 from org_unit ou
+                where ou.id = $1 and ou.deleted_at is null`,
+              [placement.orgUnitId],
+            );
+            // A unit that belongs to another legal entity is not the pair this
+            // caller named, and there is no database check for it, so the route
+            // enforces it.
+            if (unit.rows[0]?.legal_entity_id?.toLowerCase() !== placement.legalEntityId) {
+              throw new ApiError(404, 'PLACEMENT_NOT_FOUND');
+            }
+          }
+
+          // A target that is out of this member's scope answers as a miss, not
+          // as a refusal, so a scoped member cannot use these calls to find out
+          // whether an org unit exists. Only the both-null unplace has no id to
+          // hide, so that one case is the typed scope denial.
+          const allowed = await client.query<{ allowed: boolean }>(
+            'select app.person_placement_in_scope($1, $2) as allowed',
+            [placement.legalEntityId, placement.orgUnitId],
+          );
+          if (!allowed.rows[0]?.allowed) {
+            if (placement.legalEntityId === null && placement.orgUnitId === null) {
+              throw new ApiError(403, 'SCOPE_DENIED');
+            }
+            throw new ApiError(404, 'PLACEMENT_NOT_FOUND');
+          }
+
+          if (
+            currentItem.legalEntityId === placement.legalEntityId &&
+            currentItem.orgUnitId === placement.orgUnitId
+          ) {
+            // Already placed exactly here: no UPDATE, no audit row, stored row
+            // answers.
+            return currentItem;
+          }
+
+          const written = await client.query(
+            `update person
+                set legal_entity_id = $1, org_unit_id = $2
+              where id = $3 and deleted_at is null`,
+            [placement.legalEntityId, placement.orgUnitId, personId],
+          );
+          if (written.rowCount !== 1) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          // Ids only: no names, no emails, nothing else from the row.
+          await appendAuditEvent(client, {
+            action: 'person.placement.changed',
+            entityType: 'person',
+            entityId: personId,
+            actorType: 'user',
+            actorUserId: session.userId,
+            metadata: {
+              module: 'people',
+              legalEntityId: placement.legalEntityId,
+              orgUnitId: placement.orgUnitId,
+              previousLegalEntityId: currentItem.legalEntityId,
+              previousOrgUnitId: currentItem.orgUnitId,
+            },
+            ip: request.ip,
+            userAgent: request.headers['user-agent'] ?? null,
+          });
+
+          const readBack = await client.query<PeopleListRow>(
+            `${DIRECTORY_SELECT}
+              ${DIRECTORY_FROM}
+              where p.id = $1 and p.deleted_at is null`,
+            [personId],
+          );
+          const row = readBack.rows[0];
+          if (!row) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+          return peopleItemFromRow(row);
         },
       );
     } catch (error) {

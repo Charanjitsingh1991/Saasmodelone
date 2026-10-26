@@ -332,6 +332,10 @@ describe('schema inventory', () => {
         { column_name: 'last_name', privilege_type: 'INSERT' },
         { column_name: 'last_name', privilege_type: 'SELECT' },
         { column_name: 'last_name', privilege_type: 'UPDATE' },
+        { column_name: 'legal_entity_id', privilege_type: 'SELECT' },
+        { column_name: 'legal_entity_id', privilege_type: 'UPDATE' },
+        { column_name: 'org_unit_id', privilege_type: 'SELECT' },
+        { column_name: 'org_unit_id', privilege_type: 'UPDATE' },
         { column_name: 'phone', privilege_type: 'INSERT' },
         { column_name: 'phone', privilege_type: 'SELECT' },
         { column_name: 'phone', privilege_type: 'UPDATE' },
@@ -354,8 +358,8 @@ describe('schema inventory', () => {
       `);
       expect(counts.rows).toEqual([
         { privilege_type: 'INSERT', total: '8' },
-        { privilege_type: 'SELECT', total: '8' },
-        { privilege_type: 'UPDATE', total: '6' },
+        { privilege_type: 'SELECT', total: '10' },
+        { privilege_type: 'UPDATE', total: '8' },
       ]);
 
       // id is insertable so a create can name the row it made, but it is never
@@ -377,7 +381,8 @@ describe('schema inventory', () => {
         { privilege: 'update id', allowed: false },
       ]);
 
-      // Every non-identity column stays owner-only for writes.
+      // Every column outside the identity fields and the two placement columns
+      // stays owner-only for writes.
       const restricted = await client.query<{
         column_name: string;
         insertable: boolean;
@@ -387,7 +392,7 @@ describe('schema inventory', () => {
                has_column_privilege('saas_runtime', 'public.person', c, 'INSERT') as insertable,
                has_column_privilege('saas_runtime', 'public.person', c, 'UPDATE') as updatable
           from unnest(array[
-            'status', 'legal_entity_id', 'org_unit_id', 'user_id',
+            'status', 'user_id',
             'deleted_at', 'created_at', 'updated_at', 'personal_email'
           ]) c
          order by 1
@@ -395,6 +400,99 @@ describe('schema inventory', () => {
       for (const row of restricted.rows) {
         expect(row).toMatchObject({ insertable: false, updatable: false });
       }
+
+      // A placement is written onto an existing row only: the INSERT list has no
+      // placement column, so a person can only be created unplaced.
+      const placement = await client.query<{
+        column_name: string;
+        selectable: boolean;
+        insertable: boolean;
+        updatable: boolean;
+      }>(`
+        select c as column_name,
+               has_column_privilege('saas_runtime', 'public.person', c, 'SELECT') as selectable,
+               has_column_privilege('saas_runtime', 'public.person', c, 'INSERT') as insertable,
+               has_column_privilege('saas_runtime', 'public.person', c, 'UPDATE') as updatable
+          from unnest(array['legal_entity_id', 'org_unit_id']) c
+         order by 1
+      `);
+      for (const row of placement.rows) {
+        expect(row).toMatchObject({
+          selectable: true,
+          insertable: false,
+          updatable: true,
+        });
+      }
+    } finally {
+      await client.end();
+    }
+  });
+
+  test('grants the runtime column-only SELECT on the placement reference tables', async () => {
+    const client = await ownerClient();
+    try {
+      const columns = await client.query<{
+        table_name: string;
+        column_name: string;
+        privilege_type: string;
+      }>(`
+        select table_name, column_name, privilege_type
+          from information_schema.column_privileges
+         where grantee = 'saas_runtime'
+           and table_schema = 'public'
+           and table_name in ('legal_entity', 'org_unit')
+         order by table_name, column_name, privilege_type
+      `);
+      expect(columns.rows).toEqual([
+        { table_name: 'legal_entity', column_name: 'code', privilege_type: 'SELECT' },
+        { table_name: 'legal_entity', column_name: 'deleted_at', privilege_type: 'SELECT' },
+        { table_name: 'legal_entity', column_name: 'id', privilege_type: 'SELECT' },
+        { table_name: 'legal_entity', column_name: 'name', privilege_type: 'SELECT' },
+        { table_name: 'org_unit', column_name: 'deleted_at', privilege_type: 'SELECT' },
+        { table_name: 'org_unit', column_name: 'id', privilege_type: 'SELECT' },
+        { table_name: 'org_unit', column_name: 'legal_entity_id', privilege_type: 'SELECT' },
+        { table_name: 'org_unit', column_name: 'name', privilege_type: 'SELECT' },
+      ]);
+
+      // Reference data is read by id under each table's own tenant_isolation
+      // policy. No table-level privilege, and no write path: legal entity and
+      // org unit administration is not built in this milestone.
+      const privileges = await client.query<{
+        check: string;
+        allowed: boolean;
+      }>(`
+        select 'legal_entity select' as check,
+               has_table_privilege('saas_runtime', 'public.legal_entity', 'SELECT') as allowed
+        union all
+        select 'legal_entity insert',
+               has_table_privilege('saas_runtime', 'public.legal_entity', 'INSERT')
+        union all
+        select 'legal_entity update',
+               has_table_privilege('saas_runtime', 'public.legal_entity', 'UPDATE')
+        union all
+        select 'legal_entity delete',
+               has_table_privilege('saas_runtime', 'public.legal_entity', 'DELETE')
+        union all
+        select 'org_unit select',
+               has_table_privilege('saas_runtime', 'public.org_unit', 'SELECT')
+        union all
+        select 'org_unit insert',
+               has_table_privilege('saas_runtime', 'public.org_unit', 'INSERT')
+        union all
+        select 'org_unit update',
+               has_table_privilege('saas_runtime', 'public.org_unit', 'UPDATE')
+        union all
+        select 'org_unit delete',
+               has_table_privilege('saas_runtime', 'public.org_unit', 'DELETE')
+        union all
+        select 'legal_entity tenant_id',
+               has_column_privilege('saas_runtime', 'public.legal_entity', 'tenant_id', 'SELECT')
+        union all
+        select 'org_unit tenant_id',
+               has_column_privilege('saas_runtime', 'public.org_unit', 'tenant_id', 'SELECT')
+        order by 1
+      `);
+      expect(privileges.rows.filter((row) => row.allowed)).toEqual([]);
     } finally {
       await client.end();
     }

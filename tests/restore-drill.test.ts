@@ -42,7 +42,20 @@ describe('restore drill verification', () => {
     expect(identical.differences).toEqual([]);
     expect(identical.source.publicTableCount).toBeGreaterThan(60);
     expect(identical.restored.runtimeTableGrants).toContain('employment:SELECT');
-    expect(identical.restored.runtimePersonColumnGrants).toHaveLength(8);
+    // The person read surface is the eight identity and lifecycle columns the
+    // directory already needed plus the two placement columns it joins on.
+    expect(identical.restored.runtimePersonColumnGrants).toEqual([
+      'deleted_at',
+      'display_name',
+      'employee_code',
+      'first_name',
+      'id',
+      'last_name',
+      'legal_entity_id',
+      'org_unit_id',
+      'phone',
+      'work_email',
+    ]);
     expect(identical.restored.runtimeSampleCounts).toEqual({
       employment: 0,
       project: 0,

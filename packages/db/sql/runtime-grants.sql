@@ -32,18 +32,20 @@ grant select, insert, update, delete on table
 to saas_runtime;
 
 -- People directory. These are the only person columns the runtime may read,
--- plus the identity columns it may write. deleted_at is used solely to exclude
--- soft-deleted rows and is never exported or written. The write grants are
--- identity columns only: no table-level DML, no DELETE, and no grant on
--- personal_email, status, the placement columns, user_id, deleted_at, the
--- timestamps or the demographic columns - those stay owner-only. id is insertable
--- so a create can name the row it made (the restrictive scope_read policy refuses
--- INSERT ... RETURNING on person; see ADR 0008) and is deliberately absent from
--- UPDATE, so no one can move a row onto another identity. RLS remains the
--- tenant and scope boundary for every write.
+-- plus the columns it may write. deleted_at is used solely to exclude
+-- soft-deleted rows and is never exported or written. The write grants are the
+-- six identity fields plus the two placement columns: no table-level DML, no
+-- DELETE, and no grant on personal_email, status, user_id, deleted_at, the
+-- timestamps, the demographics or the reporting and source columns - those
+-- stay owner-only. Placement is writable only through UPDATE: the INSERT list
+-- has no placement column, so a person can only be created unplaced. id is
+-- insertable so a create can name the row it made (the restrictive scope_read
+-- policy refuses INSERT ... RETURNING on person; see ADR 0008) and is
+-- deliberately absent from UPDATE, so no one can move a row onto another
+-- identity. RLS remains the tenant and scope boundary for every write.
 grant select (
   id, employee_code, first_name, last_name, display_name,
-  work_email, phone, deleted_at
+  work_email, phone, deleted_at, legal_entity_id, org_unit_id
 ) on table public.person to saas_runtime;
 
 grant insert (
@@ -53,8 +55,23 @@ grant insert (
 
 grant update (
   employee_code, first_name, last_name, display_name,
-  work_email, phone
+  work_email, phone, legal_entity_id, org_unit_id
 ) on table public.person to saas_runtime;
+
+-- Placement reference data. Column-only SELECT on exactly the columns the
+-- directory join and the placement options list need; no table-level grant, no
+-- INSERT, UPDATE or DELETE, and no tenant_id. Queries reach these rows by their
+-- globally unique id and rely on the composite (tenant_id, id) foreign key from
+-- person plus the tenant_isolation RLS policy on each table; they never filter
+-- on tenant_id. Legal entity and org unit administration is not built, so the
+-- runtime role has no write path to either table.
+grant select (
+  id, name, code, deleted_at
+) on table public.legal_entity to saas_runtime;
+
+grant select (
+  id, name, legal_entity_id, deleted_at
+) on table public.org_unit to saas_runtime;
 
 -- Append-only audit writer. No SELECT, UPDATE or DELETE is granted.
 grant insert on table public.audit_event to saas_runtime;

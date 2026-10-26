@@ -5,6 +5,10 @@ export type {
   PeopleCreateInput,
   PeopleListItem,
   PeopleListResponse,
+  PeoplePlacementInput,
+  PeoplePlacementOptionEntity,
+  PeoplePlacementOptionOrgUnit,
+  PeoplePlacementOptions,
   PeopleUpdateInput,
 } from './people.js';
 export {
