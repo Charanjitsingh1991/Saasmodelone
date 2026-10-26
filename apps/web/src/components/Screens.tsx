@@ -1,8 +1,19 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import type { ContextResponse, PeopleListResponse } from '@saasmodels/contracts';
+import type {
+  ContextResponse,
+  PeopleCreateInput,
+  PeopleListItem,
+  PeopleListResponse,
+  PeopleUpdateInput,
+} from '@saasmodels/contracts';
 import {
   PEOPLE_LIST_DEFAULT_PAGE_SIZE,
   PEOPLE_SEARCH_MAX_LENGTH,
+  PERSON_DISPLAY_NAME_MAX_LENGTH,
+  PERSON_EMPLOYEE_CODE_MAX_LENGTH,
+  PERSON_NAME_MAX_LENGTH,
+  PERSON_PHONE_MAX_LENGTH,
+  PERSON_WORK_EMAIL_MAX_LENGTH,
 } from '@saasmodels/contracts';
 import { api } from '../api';
 import {
@@ -109,6 +120,196 @@ function directoryStatusCopy(state: DirectoryState): string {
   return 'Loading the directory…';
 }
 
+type PeopleFormField =
+  | 'firstName'
+  | 'lastName'
+  | 'displayName'
+  | 'employeeCode'
+  | 'workEmail'
+  | 'phone';
+
+type PeopleFormValues = Record<PeopleFormField, string>;
+
+const EMPTY_PEOPLE_FORM: PeopleFormValues = {
+  firstName: '',
+  lastName: '',
+  displayName: '',
+  employeeCode: '',
+  workEmail: '',
+  phone: '',
+};
+
+const PEOPLE_FORM_FIELDS: ReadonlyArray<{
+  key: PeopleFormField;
+  label: string;
+  maxLength: number;
+  required?: boolean;
+  email?: boolean;
+  placeholder?: string;
+}> = [
+  { key: 'firstName', label: 'First name', maxLength: PERSON_NAME_MAX_LENGTH, required: true },
+  { key: 'lastName', label: 'Last name', maxLength: PERSON_NAME_MAX_LENGTH },
+  {
+    key: 'displayName',
+    label: 'Display name',
+    maxLength: PERSON_DISPLAY_NAME_MAX_LENGTH,
+    placeholder: 'Defaults to first and last name',
+  },
+  { key: 'employeeCode', label: 'Employee code', maxLength: PERSON_EMPLOYEE_CODE_MAX_LENGTH },
+  { key: 'workEmail', label: 'Work email', maxLength: PERSON_WORK_EMAIL_MAX_LENGTH, email: true },
+  { key: 'phone', label: 'Phone', maxLength: PERSON_PHONE_MAX_LENGTH },
+];
+
+// Every failure the write routes can return has honest copy here, so the screen
+// never shows a raw server message and never shows a success it did not get.
+const PEOPLE_WRITE_ERROR_COPY: Record<string, string> = {
+  PERSON_CODE_TAKEN: 'That employee code already belongs to someone in this workspace.',
+  PERSON_EMAIL_TAKEN: 'That work email already belongs to someone in this workspace.',
+  SCOPE_DENIED:
+    'A new person starts unplaced, which only a workspace-wide role can record. Ask an owner or admin to add them.',
+  INVALID_BODY:
+    'The details were not accepted. A first name is required and each value has a length limit.',
+  CSRF_INVALID:
+    'This browser no longer matches your session. Sign out, sign in again and retry.',
+  NETWORK: 'The workspace could not be reached. Check your connection and try again.',
+};
+
+const PEOPLE_WRITE_ERROR_FALLBACK = 'The person could not be saved. Try again.';
+
+function peopleWriteErrorCopy(code: string | null): string {
+  if (code === null) {
+    return PEOPLE_WRITE_ERROR_FALLBACK;
+  }
+  return PEOPLE_WRITE_ERROR_COPY[code] ?? PEOPLE_WRITE_ERROR_FALLBACK;
+}
+
+function formValuesFromPerson(person: PeopleListItem): PeopleFormValues {
+  return {
+    firstName: person.firstName,
+    lastName: person.lastName ?? '',
+    displayName: person.displayName,
+    employeeCode: person.employeeCode ?? '',
+    workEmail: person.workEmail ?? '',
+    phone: person.phone ?? '',
+  };
+}
+
+// A blank optional on create means "not recorded", so the key is left out and
+// the audit lists only the fields someone actually filled in.
+function peopleCreateInput(values: PeopleFormValues): PeopleCreateInput {
+  const input: PeopleCreateInput = { firstName: values.firstName.trim() };
+  const optional: Exclude<PeopleFormField, 'firstName'>[] = [
+    'lastName',
+    'displayName',
+    'employeeCode',
+    'workEmail',
+    'phone',
+  ];
+  for (const field of optional) {
+    const value = values[field].trim();
+    if (value !== '') {
+      input[field] = value;
+    }
+  }
+  return input;
+}
+
+// A blank optional on edit means "clear it", which an update states as null;
+// leaving a key out would mean "unchanged".
+function peopleUpdateInput(values: PeopleFormValues): PeopleUpdateInput {
+  const trimmed = (field: PeopleFormField): string | null => {
+    const value = values[field].trim();
+    return value === '' ? null : value;
+  };
+  return {
+    // The contract cannot null the first name, so an empty one is sent as an
+    // empty value and the API answers with the validation error.
+    firstName: values.firstName.trim(),
+    lastName: trimmed('lastName'),
+    displayName: trimmed('displayName'),
+    employeeCode: trimmed('employeeCode'),
+    workEmail: trimmed('workEmail'),
+    phone: trimmed('phone'),
+  };
+}
+
+type PeopleFormProps = {
+  mode: 'create' | 'update';
+  values: PeopleFormValues;
+  submitting: boolean;
+  error: string | null;
+  onField: (field: PeopleFormField, value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onCancel: () => void;
+};
+
+function PeopleWriteForm({
+  mode,
+  values,
+  submitting,
+  error,
+  onField,
+  onSubmit,
+  onCancel,
+}: PeopleFormProps) {
+  const titleId = `people-${mode}-title`;
+
+  return (
+    <form
+      className="people-form"
+      aria-labelledby={titleId}
+      onSubmit={onSubmit}
+    >
+      <h3 id={titleId} className="people-form-title">
+        {mode === 'create' ? 'Add a person' : 'Edit this person'}
+      </h3>
+
+      <div className="people-form-grid">
+        {PEOPLE_FORM_FIELDS.map((field) => (
+          <div className="field" key={field.key}>
+            <label htmlFor={`people-form-${field.key}`}>
+              {field.label}
+              {field.required ? <span className="required-mark"> (required)</span> : null}
+            </label>
+            <input
+              id={`people-form-${field.key}`}
+              name={field.key}
+              type={field.email ? 'email' : 'text'}
+              value={values[field.key]}
+              maxLength={field.maxLength}
+              placeholder={field.placeholder}
+              autoComplete="off"
+              disabled={submitting}
+              onChange={(event) => onField(field.key, event.target.value)}
+            />
+          </div>
+        ))}
+      </div>
+
+      {error ? (
+        <p className="form-alert" role="alert">
+          {error}
+        </p>
+      ) : null}
+
+      <div className="people-form-actions">
+        <button className="button button--primary" type="submit" disabled={submitting}>
+          {mode === 'create' ? 'Save person' : 'Save changes'}
+        </button>
+        <button className="button button--quiet" type="button" onClick={onCancel} disabled={submitting}>
+          Cancel
+        </button>
+      </div>
+
+      <p className="fine-print people-form-note">
+        A new person is saved without a legal entity or org unit. Only a
+        workspace-wide owner, admin or HR can add people; placement is not
+        editable here yet.
+      </p>
+    </form>
+  );
+}
+
 export function PeopleScreen({ context }: PeopleScreenProps) {
   const people = findModule(context, 'people');
   const [draft, setDraft] = useState('');
@@ -116,6 +317,13 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
   const [page, setPage] = useState(1);
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<DirectoryState>({ phase: 'loading' });
+  const [form, setForm] = useState<
+    { mode: 'create' } | { mode: 'update'; person: PeopleListItem } | null
+  >(null);
+  const [values, setValues] = useState<PeopleFormValues>(EMPTY_PEOPLE_FORM);
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [savedMessage, setSavedMessage] = useState<string | null>(null);
 
   useEffect(() => {
     // A response is dropped once the search or page has moved on, so a slow
@@ -159,6 +367,57 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
     setPage(1);
   }
 
+  function closeForm() {
+    setForm(null);
+    setValues(EMPTY_PEOPLE_FORM);
+    setFormError(null);
+  }
+
+  function openCreateForm() {
+    setSavedMessage(null);
+    setFormError(null);
+    setValues(EMPTY_PEOPLE_FORM);
+    setForm({ mode: 'create' });
+  }
+
+  function openEditForm(person: PeopleListItem) {
+    setSavedMessage(null);
+    setFormError(null);
+    setValues(formValuesFromPerson(person));
+    setForm({ mode: 'update', person });
+  }
+
+  async function submitForm(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (form === null || submitting) {
+      return;
+    }
+    const mode = form.mode;
+    setSubmitting(true);
+    setFormError(null);
+    const result =
+      mode === 'create'
+        ? await api.createPerson(peopleCreateInput(values))
+        : await api.updatePerson(form.person.id, peopleUpdateInput(values));
+    setSubmitting(false);
+
+    if (!result.ok) {
+      if (result.status === 401) {
+        // The global listener is taking the app back to sign-in.
+        closeForm();
+        return;
+      }
+      setFormError(peopleWriteErrorCopy(result.code));
+      return;
+    }
+
+    closeForm();
+    setSavedMessage(mode === 'create' ? 'Person created.' : 'Person updated.');
+    setAttempt((current) => current + 1);
+  }
+
+  const canWrite = people?.canWrite === true;
+
   return (
     <article className="page page--people">
       <header className="page-head page-head--split">
@@ -194,7 +453,37 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
           <p className="directory-count" role="status" aria-live="polite">
             {directoryStatusCopy(state)}
           </p>
+          {canWrite ? (
+            <button
+              className="button button--primary button--small"
+              type="button"
+              onClick={openCreateForm}
+              disabled={form !== null}
+            >
+              Add person
+            </button>
+          ) : null}
         </div>
+
+        {savedMessage ? (
+          <p className="people-saved" role="status" aria-live="polite">
+            {savedMessage}
+          </p>
+        ) : null}
+
+        {form ? (
+          <PeopleWriteForm
+            mode={form.mode}
+            values={values}
+            submitting={submitting}
+            error={formError}
+            onField={(field, value) =>
+              setValues((current) => ({ ...current, [field]: value }))
+            }
+            onSubmit={(event) => void submitForm(event)}
+            onCancel={closeForm}
+          />
+        ) : null}
 
         {state.phase === 'error' ? (
           <div className="directory-state">
@@ -218,6 +507,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
                   <th scope="col">Employee code</th>
                   <th scope="col">Work email</th>
                   <th scope="col">Phone</th>
+                  {canWrite ? <th scope="col">Actions</th> : null}
                 </tr>
               </thead>
               <tbody>
@@ -227,6 +517,18 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
                     <td>{person.employeeCode ?? '—'}</td>
                     <td>{person.workEmail ?? '—'}</td>
                     <td>{person.phone ?? '—'}</td>
+                    {canWrite ? (
+                      <td>
+                        <button
+                          className="button button--quiet button--small"
+                          type="button"
+                          aria-label={`Edit ${person.displayName}`}
+                          onClick={() => openEditForm(person)}
+                        >
+                          Edit
+                        </button>
+                      </td>
+                    ) : null}
                   </tr>
                 ))}
               </tbody>

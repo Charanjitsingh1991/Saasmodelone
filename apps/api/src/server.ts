@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import cookie from '@fastify/cookie';
 import {
   hasPermission,
@@ -7,6 +7,11 @@ import {
   PEOPLE_LIST_DEFAULT_PAGE_SIZE,
   PEOPLE_LIST_MAX_PAGE_SIZE,
   PEOPLE_SEARCH_MAX_LENGTH,
+  PERSON_DISPLAY_NAME_MAX_LENGTH,
+  PERSON_EMPLOYEE_CODE_MAX_LENGTH,
+  PERSON_NAME_MAX_LENGTH,
+  PERSON_PHONE_MAX_LENGTH,
+  PERSON_WORK_EMAIL_MAX_LENGTH,
   type ContextModule,
   type ContextResponse,
   type PeopleListItem,
@@ -220,6 +225,16 @@ function secretsEqual(left: string, right: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+// The session cookie proves who is calling; this proves the call came from our
+// own page rather than a forged cross-site form. Every state-changing endpoint
+// uses it, before any tenant data is touched.
+function requireCsrfToken(session: SessionRecord, request: FastifyRequest): void {
+  const csrf = request.headers[CSRF_HEADER];
+  if (typeof csrf !== 'string' || !secretsEqual(csrf, session.csrfToken)) {
+    throw new ApiError(403, 'CSRF_INVALID');
+  }
+}
+
 // The last page a caller may ask for. Anything larger, or a value that is not
 // a plain non-negative integer, is a client error rather than a database error.
 const PEOPLE_MAX_PAGE = 1_000_000;
@@ -280,6 +295,169 @@ function validateExportBatchSize(value: number): number {
   return value;
 }
 
+// The person columns this milestone may write, in the order the contract names
+// them. Placement, status, personal email, demographics and the user link are
+// absent because the runtime holds no write privilege on them.
+const PEOPLE_WRITE_FIELDS = [
+  'firstName',
+  'lastName',
+  'displayName',
+  'employeeCode',
+  'workEmail',
+  'phone',
+] as const;
+
+type PeopleWriteField = (typeof PEOPLE_WRITE_FIELDS)[number];
+
+const PEOPLE_WRITE_COLUMNS: Record<PeopleWriteField, string> = {
+  firstName: 'first_name',
+  lastName: 'last_name',
+  displayName: 'display_name',
+  employeeCode: 'employee_code',
+  workEmail: 'work_email',
+  phone: 'phone',
+};
+
+const PEOPLE_WRITE_MAX_LENGTH: Record<PeopleWriteField, number> = {
+  firstName: PERSON_NAME_MAX_LENGTH,
+  lastName: PERSON_NAME_MAX_LENGTH,
+  displayName: PERSON_DISPLAY_NAME_MAX_LENGTH,
+  employeeCode: PERSON_EMPLOYEE_CODE_MAX_LENGTH,
+  workEmail: PERSON_WORK_EMAIL_MAX_LENGTH,
+  phone: PERSON_PHONE_MAX_LENGTH,
+};
+
+type PeopleWriteParse = {
+  // Field names the caller actually sent, so the audit can record which fields
+  // were written without recording any of their values.
+  present: PeopleWriteField[];
+  // Trimmed values. A blank or null optional field is null; an absent field is
+  // undefined, which the update path reads as "unchanged".
+  values: Partial<Record<PeopleWriteField, string | null>>;
+};
+
+function peopleWriteObject(body: unknown): Record<string, unknown> {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  return body as Record<string, unknown>;
+}
+
+function isWorkEmail(value: string): boolean {
+  if (/\s/.test(value)) {
+    return false;
+  }
+  const parts = value.split('@');
+  if (parts.length !== 2) {
+    return false;
+  }
+  const [local, domain] = parts;
+  if (!local || !domain || domain.startsWith('.') || domain.endsWith('.')) {
+    return false;
+  }
+  return domain.includes('.') && !domain.split('.').some((label) => label === '');
+}
+
+// One parser for both writes: create requires firstName, update treats every
+// key as "send it to change it, omit it to keep it".
+function parsePeopleWrite(body: Record<string, unknown>, mode: 'create' | 'update'): PeopleWriteParse {
+  for (const key of Object.keys(body)) {
+    if (!(PEOPLE_WRITE_FIELDS as readonly string[]).includes(key)) {
+      throw new ApiError(400, 'INVALID_BODY');
+    }
+  }
+
+  const present: PeopleWriteField[] = [];
+  const values: Partial<Record<PeopleWriteField, string | null>> = {};
+
+  for (const field of PEOPLE_WRITE_FIELDS) {
+    if (!Object.hasOwn(body, field)) {
+      continue;
+    }
+    const raw = body[field];
+    if (raw !== null && typeof raw !== 'string') {
+      throw new ApiError(400, 'INVALID_BODY');
+    }
+    const trimmed = typeof raw === 'string' ? raw.trim() : '';
+    if (trimmed === '') {
+      // firstName is the one field that must always hold a value, and the only
+      // one that can never be cleared.
+      if (field === 'firstName') {
+        throw new ApiError(400, 'INVALID_BODY');
+      }
+      present.push(field);
+      values[field] = null;
+      continue;
+    }
+    if (trimmed.length > PEOPLE_WRITE_MAX_LENGTH[field]) {
+      throw new ApiError(400, 'INVALID_BODY');
+    }
+    if (field === 'workEmail' && !isWorkEmail(trimmed)) {
+      throw new ApiError(400, 'INVALID_BODY');
+    }
+    present.push(field);
+    values[field] = trimmed;
+  }
+
+  if (mode === 'create' && typeof values.firstName !== 'string') {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  if (present.length === 0) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  return { present, values };
+}
+
+// An absent key leaves the stored value alone; a null or blank key clears it.
+function pickPeopleField(
+  parsed: PeopleWriteParse,
+  field: PeopleWriteField,
+  current: string | null,
+): string | null {
+  if (!Object.hasOwn(parsed.values, field)) {
+    return current;
+  }
+  return parsed.values[field] ?? null;
+}
+
+// The directory shows one name per person, so the two halves have to fit the
+// display column together with the separator that joins them.
+function checkCombinedName(firstName: string, lastName: string | null): void {
+  if (`${firstName} ${lastName ?? ''}`.trim().length > PERSON_DISPLAY_NAME_MAX_LENGTH) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+}
+
+function deriveDisplayName(firstName: string, lastName: string | null): string {
+  const displayName = `${firstName} ${lastName ?? ''}`.trim();
+  if (displayName === '' || displayName.length > PERSON_DISPLAY_NAME_MAX_LENGTH) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  return displayName;
+}
+
+function peopleItemFromRow(row: PeopleListRow): PeopleListItem {
+  return {
+    id: row.id,
+    employeeCode: row.employee_code,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    displayName: row.display_name,
+    workEmail: row.work_email,
+    phone: row.phone,
+  };
+}
+
+const DIRECTORY_SELECT_COLUMNS = `id,
+                    employee_code,
+                    first_name,
+                    last_name,
+                    display_name,
+                    work_email::text as work_email,
+                    phone`;
+
+const UUID_TEXT_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function validateRateLimit(options: RateLimitOptions, name: string): RateLimitOptions {
   if (
     !Number.isInteger(options.max) ||
@@ -443,13 +621,13 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
 
   // Auth, context and directory responses carry credentials, session,
   // authorization or tenant data and must never be cached by a browser, proxy
-  // or shared cache, including error responses.
+  // or shared cache, including error responses. Every People path is covered by
+  // prefix, so a write, a 4xx and a 5xx are all no-store too.
   app.addHook('onSend', async (request, reply) => {
     if (
       request.url.startsWith('/v1/auth/') ||
       request.url.startsWith('/v1/context') ||
-      request.url === '/v1/people' ||
-      request.url.startsWith('/v1/people?')
+      request.url.startsWith('/v1/people')
     ) {
       reply.header('cache-control', 'no-store');
     }
@@ -531,10 +709,7 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
       return unauthenticated(reply);
     }
 
-    const csrf = request.headers[CSRF_HEADER];
-    if (typeof csrf !== 'string' || !secretsEqual(csrf, session.csrfToken)) {
-      throw new ApiError(403, 'CSRF_INVALID');
-    }
+    requireCsrfToken(session, request);
 
     await revokeSession(authPool, token);
     clearSessionCookie(reply);
@@ -675,6 +850,247 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
             pageSize,
           };
           return body;
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  app.post('/v1/people', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+    requireCsrfToken(session, request);
+
+    try {
+      const item = await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'people', operation: 'write' },
+        },
+        async (client) => {
+          // Inside the gated transaction on purpose: a role that may not write
+          // is refused before the body is read at all.
+          const parsed = parsePeopleWrite(peopleWriteObject(request.body), 'create');
+          const firstName = parsed.values.firstName as string;
+          const lastName = parsed.values.lastName ?? null;
+          checkCombinedName(firstName, lastName);
+          const displayName =
+            parsed.values.displayName ?? deriveDisplayName(firstName, lastName);
+
+          // An unplaced person is only creatable by a tenant-wide member: a
+          // scoped member could neither see nor maintain it afterwards. The
+          // helper answers first so the client gets a typed 403, and
+          // scope_insert is the database half of the same rule.
+          const placement = await client.query<{ allowed: boolean }>(
+            'select app.person_placement_in_scope(null, null) as allowed',
+          );
+          if (!placement.rows[0]?.allowed) {
+            throw new ApiError(403, 'SCOPE_DENIED');
+          }
+
+          // The id is generated here and named in the insert instead of taken
+          // from RETURNING: the restrictive scope_read policy calls
+          // app.person_visible(id), which cannot observe a row created by the
+          // same command, so every person INSERT ... RETURNING is refused.
+          // ADR 0008 records the reproduction.
+          const id = randomUUID();
+          try {
+            await client.query(
+              `insert into person
+                 (id, tenant_id, employee_code, first_name, last_name, display_name, work_email, phone)
+               values
+                 ($1, app.current_tenant_id(), $2, $3, $4, $5, $6, $7)`,
+              [
+                id,
+                parsed.values.employeeCode ?? null,
+                firstName,
+                lastName,
+                displayName,
+                parsed.values.workEmail ?? null,
+                parsed.values.phone ?? null,
+              ],
+            );
+          } catch (error) {
+            const violation = error as { code?: string; constraint?: string };
+            if (violation.code !== '23505') {
+              throw error;
+            }
+            // The message never repeats the code or email that collided.
+            if (violation.constraint === 'person_tenant_id_employee_code_key') {
+              throw new ApiError(409, 'PERSON_CODE_TAKEN');
+            }
+            if (violation.constraint === 'person_tenant_id_work_email_key') {
+              throw new ApiError(409, 'PERSON_EMAIL_TAKEN');
+            }
+            throw new ApiError(409, 'PERSON_CONFLICT');
+          }
+
+          const created = await client.query<PeopleListRow>(
+            `select ${DIRECTORY_SELECT_COLUMNS}
+               from person
+              where id = $1 and deleted_at is null`,
+            [id],
+          );
+          const row = created.rows[0];
+          if (!row) {
+            // A row this transaction just wrote is not readable inside it.
+            // That is an invariant break, so it fails closed as a 500 and the
+            // insert rolls back with the audit row.
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          await appendAuditEvent(client, {
+            action: 'person.created',
+            entityType: 'person',
+            entityId: id,
+            actorType: 'user',
+            actorUserId: session.userId,
+            // Field names only: the values stay in the directory, not the audit.
+            metadata: { module: 'people', fields: [...parsed.present].sort() },
+            ip: request.ip,
+            userAgent: request.headers['user-agent'] ?? null,
+          });
+
+          return peopleItemFromRow(row);
+        },
+      );
+
+      reply.code(201);
+      return item;
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  app.patch('/v1/people/:id', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+    requireCsrfToken(session, request);
+
+    const personId = (request.params as { id?: unknown }).id;
+
+    try {
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'people', operation: 'write' },
+        },
+        async (client) => {
+          // Checked here, after entitlement and role have settled and before any
+          // SQL: a denied caller is denied the same way whatever the id looks
+          // like, and no malformed UUID reaches the database.
+          if (typeof personId !== 'string' || !UUID_TEXT_PATTERN.test(personId)) {
+            // A malformed id addresses no person, exactly like an id from another
+            // tenant or one that was soft-deleted.
+            throw new ApiError(404, 'PERSON_NOT_FOUND');
+          }
+
+          const parsed = parsePeopleWrite(peopleWriteObject(request.body), 'update');
+
+          const current = await client.query<PeopleListRow>(
+            `select ${DIRECTORY_SELECT_COLUMNS}
+               from person
+              where id = $1 and deleted_at is null`,
+            [personId],
+          );
+          const row = current.rows[0];
+          if (!row) {
+            throw new ApiError(404, 'PERSON_NOT_FOUND');
+          }
+          const currentItem = peopleItemFromRow(row);
+
+          const firstName = parsed.values.firstName ?? currentItem.firstName;
+          const lastName = pickPeopleField(parsed, 'lastName', currentItem.lastName);
+          checkCombinedName(firstName, lastName);
+          const displayName = Object.hasOwn(parsed.values, 'displayName')
+            ? (parsed.values.displayName ?? deriveDisplayName(firstName, lastName))
+            : currentItem.displayName;
+
+          const values: Record<PeopleWriteField, string | null> = {
+            firstName,
+            lastName,
+            displayName,
+            employeeCode: pickPeopleField(parsed, 'employeeCode', currentItem.employeeCode),
+            workEmail: pickPeopleField(parsed, 'workEmail', currentItem.workEmail),
+            phone: pickPeopleField(parsed, 'phone', currentItem.phone),
+          };
+
+          const changed = PEOPLE_WRITE_FIELDS.filter((field) => {
+            const next = values[field];
+            const previous = currentItem[field];
+            // work_email is citext, so two spellings of one address are one value.
+            if (
+              field === 'workEmail' &&
+              next !== null &&
+              previous !== null
+            ) {
+              return next.toLowerCase() !== previous.toLowerCase();
+            }
+            return next !== previous;
+          }).sort();
+
+          if (changed.length === 0) {
+            // Nothing moved: no UPDATE, no audit row, and the stored row answers.
+            return currentItem;
+          }
+
+          const setValues: unknown[] = [];
+          const assignments = changed.map((field) => {
+            setValues.push(values[field]);
+            return `${PEOPLE_WRITE_COLUMNS[field]} = $${setValues.length}`;
+          });
+
+          let updated;
+          try {
+            updated = await client.query<PeopleListRow>(
+              `update person
+                  set ${assignments.join(', ')}
+                where id = $${setValues.length + 1} and deleted_at is null
+                returning ${DIRECTORY_SELECT_COLUMNS}`,
+              [...setValues, personId],
+            );
+          } catch (error) {
+            const violation = error as { code?: string; constraint?: string };
+            if (violation.code !== '23505') {
+              throw error;
+            }
+            // Renaming onto an existing code or email is the same collision the
+            // create route reports, and for the same reason the value is not
+            // repeated back to the caller.
+            if (violation.constraint === 'person_tenant_id_employee_code_key') {
+              throw new ApiError(409, 'PERSON_CODE_TAKEN');
+            }
+            if (violation.constraint === 'person_tenant_id_work_email_key') {
+              throw new ApiError(409, 'PERSON_EMAIL_TAKEN');
+            }
+            throw new ApiError(409, 'PERSON_CONFLICT');
+          }
+          const updatedRow = updated.rows[0];
+          if (!updatedRow) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          await appendAuditEvent(client, {
+            action: 'person.updated',
+            entityType: 'person',
+            entityId: personId,
+            actorType: 'user',
+            actorUserId: session.userId,
+            metadata: { module: 'people', changedFields: changed },
+            ip: request.ip,
+            userAgent: request.headers['user-agent'] ?? null,
+          });
+
+          return peopleItemFromRow(updatedRow);
         },
       );
     } catch (error) {

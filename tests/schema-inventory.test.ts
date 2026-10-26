@@ -294,7 +294,7 @@ describe('schema inventory', () => {
     }
   });
 
-  test('grants only eight person columns and no table privilege', async () => {
+  test('grants only the reviewed person columns and no table privilege', async () => {
     const client = await ownerClient();
     try {
       const tablePrivileges = await client.query<{
@@ -318,14 +318,83 @@ describe('schema inventory', () => {
       `);
       expect(columns.rows).toEqual([
         { column_name: 'deleted_at', privilege_type: 'SELECT' },
+        { column_name: 'display_name', privilege_type: 'INSERT' },
         { column_name: 'display_name', privilege_type: 'SELECT' },
+        { column_name: 'display_name', privilege_type: 'UPDATE' },
+        { column_name: 'employee_code', privilege_type: 'INSERT' },
         { column_name: 'employee_code', privilege_type: 'SELECT' },
+        { column_name: 'employee_code', privilege_type: 'UPDATE' },
+        { column_name: 'first_name', privilege_type: 'INSERT' },
         { column_name: 'first_name', privilege_type: 'SELECT' },
+        { column_name: 'first_name', privilege_type: 'UPDATE' },
+        { column_name: 'id', privilege_type: 'INSERT' },
         { column_name: 'id', privilege_type: 'SELECT' },
+        { column_name: 'last_name', privilege_type: 'INSERT' },
         { column_name: 'last_name', privilege_type: 'SELECT' },
+        { column_name: 'last_name', privilege_type: 'UPDATE' },
+        { column_name: 'phone', privilege_type: 'INSERT' },
         { column_name: 'phone', privilege_type: 'SELECT' },
+        { column_name: 'phone', privilege_type: 'UPDATE' },
+        { column_name: 'tenant_id', privilege_type: 'INSERT' },
+        { column_name: 'work_email', privilege_type: 'INSERT' },
         { column_name: 'work_email', privilege_type: 'SELECT' },
+        { column_name: 'work_email', privilege_type: 'UPDATE' },
       ]);
+
+      // The same inventory expressed as counts, so a grant added in the wrong
+      // place cannot hide inside an ordered list comparison.
+      const counts = await client.query<{ privilege_type: string; total: string }>(`
+        select privilege_type, count(*)::text as total
+          from information_schema.column_privileges
+         where grantee = 'saas_runtime'
+           and table_schema = 'public'
+           and table_name = 'person'
+         group by privilege_type
+         order by privilege_type
+      `);
+      expect(counts.rows).toEqual([
+        { privilege_type: 'INSERT', total: '8' },
+        { privilege_type: 'SELECT', total: '8' },
+        { privilege_type: 'UPDATE', total: '6' },
+      ]);
+
+      // id is insertable so a create can name the row it made, but it is never
+      // updatable or deletable: no one can move a row onto another identity.
+      const identity = await client.query<{ privilege: string; allowed: boolean }>(`
+        select 'update id' as privilege,
+               has_column_privilege('saas_runtime', 'public.person', 'id', 'UPDATE') as allowed
+        union all
+        select 'insert tenant_id',
+               has_column_privilege('saas_runtime', 'public.person', 'tenant_id', 'INSERT')
+        union all
+        select 'delete row',
+               has_table_privilege('saas_runtime', 'public.person', 'DELETE')
+        order by 1
+      `);
+      expect(identity.rows).toEqual([
+        { privilege: 'delete row', allowed: false },
+        { privilege: 'insert tenant_id', allowed: true },
+        { privilege: 'update id', allowed: false },
+      ]);
+
+      // Every non-identity column stays owner-only for writes.
+      const restricted = await client.query<{
+        column_name: string;
+        insertable: boolean;
+        updatable: boolean;
+      }>(`
+        select c as column_name,
+               has_column_privilege('saas_runtime', 'public.person', c, 'INSERT') as insertable,
+               has_column_privilege('saas_runtime', 'public.person', c, 'UPDATE') as updatable
+          from unnest(array[
+            'status', 'legal_entity_id', 'org_unit_id', 'user_id',
+            'deleted_at', 'created_at', 'updated_at', 'personal_email'
+          ]) c
+         order by 1
+      `);
+      for (const row of restricted.rows) {
+        expect(row).toMatchObject({ insertable: false, updatable: false });
+      }
     } finally {
       await client.end();
     }

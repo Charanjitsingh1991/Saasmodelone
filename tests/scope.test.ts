@@ -973,11 +973,13 @@ describe('people scope schema and privileges', () => {
       expect(one(userIdColumn.rows).allowed).toBe(false);
 
       const personColumns = await client.query<{ column_name: string }>(`
-        select column_name
+        select distinct column_name
           from information_schema.column_privileges
          where grantee = 'saas_runtime' and table_name = 'person'
          order by 1
       `);
+      // Distinct columns only; tests/schema-inventory.test.ts pins the exact
+      // 8 SELECT + 8 INSERT + 6 UPDATE privilege inventory.
       expect(personColumns.rows.map((row) => row.column_name)).toEqual([
         'deleted_at',
         'display_name',
@@ -986,6 +988,7 @@ describe('people scope schema and privileges', () => {
         'id',
         'last_name',
         'phone',
+        'tenant_id',
         'work_email',
       ]);
     });
@@ -1388,17 +1391,17 @@ describe('people scope write semantics', () => {
     ).toBe(false);
   });
 
-  test('keeps person write policies pinned while the runtime role holds no person write privilege', async () => {
+  test('pins the person write policies against the identity column grants', async () => {
     const s = scope();
-    // The runtime role has eight person column SELECT grants and no DML, so a
-    // person write cannot be exercised through RLS. Both facts are asserted:
-    // the policy exists with the reviewed expression, and the privilege stays
-    // absent so no one mistakes the 42501 below for a scope verdict.
+    // T19 gives the runtime role column-level INSERT and UPDATE on the person
+    // identity columns only. Table-level DML is still refused, so the write
+    // boundary here is RLS, not a grant: the 42501 below names the
+    // scope_insert policy rather than "permission denied for table person".
     const privileges = await withOwner(async (client) => {
       const result = await client.query<{ privilege: string; allowed: boolean }>(`
         select p as privilege,
                has_table_privilege('saas_runtime', 'public.person', p) as allowed
-          from unnest(array['INSERT', 'UPDATE', 'DELETE']) p
+          from unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) p
          order by 1
       `);
       return result.rows;
@@ -1406,17 +1409,51 @@ describe('people scope write semantics', () => {
     expect(privileges).toEqual([
       { privilege: 'DELETE', allowed: false },
       { privilege: 'INSERT', allowed: false },
+      { privilege: 'SELECT', allowed: false },
       { privilege: 'UPDATE', allowed: false },
     ]);
 
-    const error = await expectError(
+    const denied = await expectError(
       s.tenantA,
       s.managerEntity,
-      `insert into person (tenant_id, first_name, display_name)
-       values ($1, 'Denied', 'Out Of Scope Insert')`,
+      `insert into person (id, tenant_id, first_name, display_name)
+       values (gen_random_uuid(), $1, 'Denied', 'Out Of Scope Insert')`,
       [s.tenantA],
     );
-    expect(error.code).toBe('42501');
+    expect(denied.code).toBe('42501');
+    expect(denied.message).toContain('row-level security');
+    expect(denied.message).toContain('scope_insert');
+
+    // A tenant-wide member may create an unplaced person; that is the database
+    // behaviour the People create route depends on. The id is supplied by the
+    // caller and the insert carries no RETURNING, because the restrictive
+    // scope_read policy cannot observe a row created by the same command; the
+    // row is readable by the next statement in the same transaction (ADR 0008).
+    const newPersonId = '7f0d1c2e-4b5a-4c6d-9e8f-1a2b3c4d5e6f';
+    const created = await withMember(s.tenantA, s.managerWide, async (client) => {
+      await client.query(
+        `insert into person (id, tenant_id, first_name, display_name)
+         values ($1, $2, 'Placed Later', 'Wide Create')`,
+        [newPersonId, s.tenantA],
+      );
+      const readBack = await client.query<{ display_name: string }>(
+        'select display_name from person where id = $1',
+        [newPersonId],
+      );
+      return one(readBack.rows).display_name;
+    });
+    expect(created).toBe('Wide Create');
+
+    // Placement stays out of reach: the identity grants do not extend to it, so
+    // even a tenant-wide member cannot move a row across the org.
+    const placementError = await expectError(
+      s.tenantA,
+      s.managerWide,
+      `update person set legal_entity_id = $1 where id = $2`,
+      [s.entity1, s.personEntity1],
+    );
+    expect(placementError.code).toBe('42501');
+    expect(placementError.message).not.toContain('row-level security');
 
     const placement = await helperBoolean(
       s.tenantA,

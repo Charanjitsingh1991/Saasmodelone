@@ -939,6 +939,68 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
   line-height: 1.6;
 }
 
+/* People write form. It reuses .field and .form-alert from the sign-in card so
+   the controls stay on the same tokens. */
+
+.people-saved {
+  margin: 18px 0 0;
+  color: var(--violet);
+  font-size: 0.88rem;
+  font-weight: 620;
+}
+
+.people-form {
+  margin: 22px 0 0;
+  padding: clamp(18px, 3vw, 26px);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--paper-raised);
+}
+
+.people-form-title {
+  margin: 0;
+  font-size: 1.12rem;
+  font-weight: 640;
+  letter-spacing: -0.02em;
+}
+
+.people-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 20px;
+  margin-top: 18px;
+}
+
+.required-mark {
+  color: var(--ink-faint);
+  font-weight: 500;
+}
+
+.people-form .field input::placeholder {
+  color: var(--ink-faint);
+  opacity: 1;
+}
+
+.people-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+/* The primary button is full width in the sign-in card; here it sits beside
+   Cancel, and the media query below returns both to full width on phones. */
+.people-form-actions .button--primary {
+  width: auto;
+}
+
+.people-form-note {
+  max-width: 64ch;
+  margin: 16px 0 0;
+  line-height: 1.6;
+}
+
 .panel-state {
   max-width: 660px;
   padding-top: clamp(30px, 7vw, 80px);
@@ -1150,6 +1212,20 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
 
   .searchbox {
     flex: 1 1 auto;
+  }
+
+  .people-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .people-form-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .people-form-actions .button,
+  .people-form-actions .button--primary {
+    width: 100%;
   }
 
   .panel-state .text-link {

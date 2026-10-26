@@ -197,3 +197,33 @@ database.
   function to either surface, and neither does the read-only directory route and
   the screen that consume it, so all of these figures are unchanged by both and
   were re-derived from the live database to confirm that.
+
+## Amendment — T19 adds the People write path (M1 slice 4)
+
+The bullet above that says `saas_runtime` holds "no `INSERT`, `UPDATE` or `DELETE` on
+`person` (only the eight directory column `SELECT` grants)" and that person writes are
+therefore proven by catalogue pin plus helper truth table describes the tree as this ADR
+was written, and it is superseded by
+[ADR 0008](0008-people-write-path.md). The People write path grants the runtime role
+column-level `INSERT` on `id, tenant_id` and the six identity fields and column-level
+`UPDATE` on the six identity fields, so the person write-side policies are no longer
+asserted only through `pg_policy` and helper results: `tests/scope.test.ts` now exercises
+them with real DML — a scoped member's unplaced insert fails `42501` naming
+`scope_insert`, and a tenant-wide member's unplaced insert commits and reads back inside
+the same transaction. Nothing else in this ADR changes. No policy, no helper and no
+permissive rule was weakened, no migration was added, and scope stays a database property
+that only narrows: the write grants cover the identity columns alone, `id` is insertable
+but never updatable, `deleted_at`, `status`, the placement columns, `user_id`, the
+timestamps, `personal_email` and the demographic columns stay owner-only, and there is still no
+table-level privilege and no `DELETE` on `person`. The person column privilege inventory
+moves from 8 to 22 (8 `SELECT` + 8 `INSERT` + 6 `UPDATE`); 12 migrations, 75 public base
+tables, 67 with `tenant_id`, 66 RLS-enabled and 274 policies are unchanged, and the
+`saas_worker` surface stays at zero table and column privileges with exactly eight
+executable functions. `person.user_id` remains owner-written and out of band — the write
+path cannot set it, and no API route links a person to a user.
+
+The Consequences bullet above that ends "... so all of these figures are unchanged by both and
+were re-derived from the live database to confirm that" describes the
+scope-administration and directory-read slices, and it stands for them. This slice is
+the one that moves a privilege figure rather than only adding a route, so read that
+bullet together with the paragraph above rather than as a claim about the write path.

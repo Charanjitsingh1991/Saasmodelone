@@ -31,13 +31,29 @@ grant select, insert, update, delete on table
   public.project
 to saas_runtime;
 
--- People directory export. These are the only person columns the runtime may
--- read. deleted_at is used solely to exclude soft-deleted rows and is never
--- exported. RLS remains the tenant boundary; every other person column stays
--- owner-only.
+-- People directory. These are the only person columns the runtime may read,
+-- plus the identity columns it may write. deleted_at is used solely to exclude
+-- soft-deleted rows and is never exported or written. The write grants are
+-- identity columns only: no table-level DML, no DELETE, and no grant on
+-- personal_email, status, the placement columns, user_id, deleted_at, the
+-- timestamps or the demographic columns - those stay owner-only. id is insertable
+-- so a create can name the row it made (the restrictive scope_read policy refuses
+-- INSERT ... RETURNING on person; see ADR 0008) and is deliberately absent from
+-- UPDATE, so no one can move a row onto another identity. RLS remains the
+-- tenant and scope boundary for every write.
 grant select (
   id, employee_code, first_name, last_name, display_name,
   work_email, phone, deleted_at
+) on table public.person to saas_runtime;
+
+grant insert (
+  id, tenant_id, employee_code, first_name, last_name, display_name,
+  work_email, phone
+) on table public.person to saas_runtime;
+
+grant update (
+  employee_code, first_name, last_name, display_name,
+  work_email, phone
 ) on table public.person to saas_runtime;
 
 -- Append-only audit writer. No SELECT, UPDATE or DELETE is granted.

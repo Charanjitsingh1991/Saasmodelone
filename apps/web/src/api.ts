@@ -1,6 +1,9 @@
 import type {
   ContextResponse,
+  PeopleCreateInput,
+  PeopleListItem,
   PeopleListResponse,
+  PeopleUpdateInput,
   SessionResponse,
 } from '@saasmodels/contracts';
 
@@ -82,6 +85,15 @@ async function request<T>(
   return { ok: true, data: body as T };
 }
 
+// A write needs both halves: a JSON body and the in-memory CSRF token. The API
+// refuses either one alone, so no caller can send a "simple" cross-site request.
+function writeHeaders(): Record<string, string> {
+  return {
+    'content-type': 'application/json',
+    ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),
+  };
+}
+
 export const api = {
   session: () => request<SessionResponse>('/v1/auth/session'),
 
@@ -104,6 +116,20 @@ export const api = {
       query === '' ? '/v1/people' : `/v1/people?${query}`,
     );
   },
+
+  createPerson: (input: PeopleCreateInput) =>
+    request<PeopleListItem>('/v1/people', {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify(input),
+    }),
+
+  updatePerson: (id: string, input: PeopleUpdateInput) =>
+    request<PeopleListItem>(`/v1/people/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: writeHeaders(),
+      body: JSON.stringify(input),
+    }),
 
   login: (input: LoginInput) =>
     request<SessionResponse>('/v1/auth/login', {

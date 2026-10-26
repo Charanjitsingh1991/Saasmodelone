@@ -111,7 +111,7 @@ test.afterAll(async () => {
   await database?.drop();
 });
 
-test('signs in, renders and searches the directory, gates People and persists only the theme', async ({
+test('signs in, searches, creates and edits the directory, gates People and persists only the theme', async ({
   page,
 }) => {
   const people = requireAccount(peopleAccount, 'People');
@@ -148,7 +148,9 @@ test('signs in, renders and searches the directory, gates People and persists on
   await expect(page.locator('.page-head .badge')).toHaveText('Read and write');
 
   const directory = page.getByRole('table', { name: 'People directory' });
-  const liveCount = page.getByRole('status');
+  // The directory count and the save announcement are two separate live
+  // regions, so each is addressed by its own element rather than by role.
+  const liveCount = page.locator('.directory-count');
   await expect(liveCount).toHaveAttribute('aria-live', 'polite');
   await expect(liveCount).toHaveText('4 people');
   await expect(directory.getByRole('rowheader')).toHaveCount(4);
@@ -183,6 +185,79 @@ test('signs in, renders and searches the directory, gates People and persists on
   await expect(directory.getByRole('rowheader')).toHaveCount(4);
   expect(page.url()).not.toContain('Grace');
 
+  // The write path: an owner adds a person, sees the row, and corrects a value.
+  await page.getByRole('button', { name: 'Add person' }).click();
+  const createForm = page.getByRole('form', { name: 'Add a person' });
+  await expect(createForm.locator('.field')).toHaveCount(6);
+  await expect(page.locator('#people-form-firstName')).toBeEnabled();
+  await expect(page.locator('.people-form-note')).toContainText('legal entity');
+
+  // The panel is a two-column grid, so it has to fold without spilling over.
+  for (const width of [390, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await noHorizontalOverflow(page);
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+
+  await page.locator('#people-form-firstName').fill('Nadia');
+  await page.locator('#people-form-lastName').fill('Kaur');
+  await page.locator('#people-form-employeeCode').fill('E2E-001');
+  await page.locator('#people-form-workEmail').fill('e2e-nadia@example.test');
+  await page.locator('#people-form-phone').fill('+1 555 0900');
+  await page.getByRole('button', { name: 'Save person' }).click();
+
+  const saved = page.locator('.people-saved');
+  await expect(saved).toHaveAttribute('aria-live', 'polite');
+  await expect(saved).toHaveText('Person created.');
+  await expect(liveCount).toHaveText('5 people');
+  await expect(createForm).toHaveCount(0);
+  await expect(
+    directory.getByRole('rowheader', { name: 'Nadia Kaur', exact: true }),
+  ).toBeVisible();
+  await expect(
+    directory.getByRole('cell', { name: 'E2E-001', exact: true }),
+  ).toBeVisible();
+  await expect(
+    directory.getByRole('cell', { name: '+1 555 0900', exact: true }),
+  ).toBeVisible();
+
+  // Editing works from the row itself, and the panel starts with stored values.
+  await directory
+    .getByRole('button', { name: 'Edit Nadia Kaur' })
+    .click();
+  const editForm = page.getByRole('form', { name: 'Edit this person' });
+  await expect(editForm).toBeVisible();
+  await expect(page.locator('#people-form-firstName')).toHaveValue('Nadia');
+  await expect(page.locator('#people-form-employeeCode')).toHaveValue('E2E-001');
+  await page.locator('#people-form-phone').fill('+1 555 0901');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  await expect(saved).toHaveText('Person updated.');
+  await expect(
+    directory.getByRole('cell', { name: '+1 555 0901', exact: true }),
+  ).toBeVisible();
+
+  // A duplicate code is refused with honest copy and no new row.
+  await page.getByRole('button', { name: 'Add person' }).click();
+  await page.locator('#people-form-firstName').fill('Duplicate');
+  await page.locator('#people-form-employeeCode').fill('E2E-001');
+  await page.getByRole('button', { name: 'Save person' }).click();
+  await expect(page.locator('.form-alert')).toHaveText(
+    'That employee code already belongs to someone in this workspace.',
+  );
+  await expect(liveCount).toHaveText('5 people');
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(editForm).toHaveCount(0);
+  await expect(createForm).toHaveCount(0);
+
+  // The new person is searchable like any other row.
+  await search.fill('Nadia');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(liveCount).toHaveText('1 person');
+  await expect(directory.getByRole('rowheader')).toHaveCount(1);
+  await search.fill('');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(liveCount).toHaveText('5 people');
+
   const nav = page.getByRole('navigation', { name: 'Modules' });
   await expect(nav.getByRole('link', { name: /People/ })).toHaveAttribute(
     'aria-current',
@@ -215,7 +290,12 @@ test('signs in, renders and searches the directory, gates People and persists on
   await expect(
     page.getByRole('heading', { name: 'People', exact: true }),
   ).toBeVisible();
-  await expect(liveCount).toHaveText('4 people');
+  // The created person survives the reload: the row is in the database, not
+  // just in component state.
+  await expect(liveCount).toHaveText('5 people');
+  await expect(
+    directory.getByRole('rowheader', { name: 'Nadia Kaur', exact: true }),
+  ).toBeVisible();
   expect(await page.evaluate(() => Object.keys(localStorage))).toEqual([
     'saasmodels.theme',
   ]);

@@ -59,9 +59,19 @@ to prove the M0 exit criterion.
 - The M0 People screen is deliberately an empty state. It has no data entry,
   import, export, invitation or CRUD, and it makes no directory request.
 - M1 note: that empty state has since been replaced — `/app/people` now renders
-  the read-only `GET /v1/people` directory with search, a live result count and
-  paging, still with no write path and no scope label, and every decision above
-  still holds.
+  the `GET /v1/people` directory with search, a live result count and paging, and
+  every decision above still holds.
+- M1 note (second): the directory is no longer read-only. For a member whose role
+  holds `people.write`, `/app/people` gains an **Add person** control and a per-row
+  **Edit** action that open one inline panel over the six core identity fields, announce
+  `Person created.` / `Person updated.` in a polite live region and show typed failure copy
+  per error code; a member without it sees the same table with no write affordance. That
+  panel changes no decision in this ADR — still three routes, no routing library, the
+  CSRF token in module memory only, the theme the only stored preference, nothing rendered
+  as raw HTML, and no scope label, because the runtime still cannot read `membership_scope`.
+  There is still no delete, restore, status, placement or employment control, no import and
+  no export button, and the write path itself is decided in
+  [`0008-people-write-path.md`](0008-people-write-path.md).
 - The client bundle is small enough to reason about but not split by route yet;
   code splitting can be introduced when module screens exist.
 - Same-origin deployment means cookies use `SameSite=Strict` without CORS
