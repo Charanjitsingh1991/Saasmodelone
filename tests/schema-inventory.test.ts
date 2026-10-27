@@ -85,7 +85,7 @@ describe('schema inventory', () => {
     }
   });
 
-  test('holds exactly one permissive isolation policy per RLS table inside the reviewed 275-policy inventory', async () => {
+  test('holds exactly one permissive isolation policy per RLS table inside the reviewed 277-policy inventory', async () => {
     const client = await ownerClient();
     try {
       const totals = await client.query<{ permissive: string; restrictive: string }>(`
@@ -96,7 +96,7 @@ describe('schema inventory', () => {
           join pg_namespace n on n.oid = c.relnamespace
          where n.nspname = 'public'
       `);
-      expect(totals.rows).toEqual([{ permissive: '66', restrictive: '209' }]);
+      expect(totals.rows).toEqual([{ permissive: '66', restrictive: '211' }]);
 
       const perTable = await client.query<{ rls_tables: string; with_isolation: string }>(`
         select count(*) filter (where c.relrowsecurity)::text as rls_tables,
@@ -132,13 +132,18 @@ describe('schema inventory', () => {
          order by c.relname, p.polname
       `);
       // 0012 adds the same four names to person and employment. 0013 adds the one
-      // name compensation has today - a read - because no route writes salary yet
-      // and the runtime holds no write privilege on the table. All of them are
-      // restrictive, so they AND with tenant_isolation and the module_people_*
-      // set instead of replacing either; tests/scope.test.ts asserts the
-      // expressions and tests/people-compensation.test.ts the grant beside them.
+      // name compensation had at the time - a read - because no route wrote salary
+      // yet and the runtime held no write privilege on the table. 0014 adds the
+      // insert and update pair, so all three person-child tables now carry the
+      // same shape of scope layer, and compensation carries no delete name because
+      // a pay row is superseded, not erased. All eleven are restrictive, so they AND
+      // with tenant_isolation and the module_people_* set instead of replacing
+      // either; tests/scope.test.ts asserts the expressions and
+      // tests/people-compensation-write.test.ts the two grants beside them.
       expect(scopePolicies.rows.map((row) => `${row.table_name}.${row.polname}`)).toEqual([
+        'compensation.scope_insert',
         'compensation.scope_read',
+        'compensation.scope_update',
         'employment.scope_delete',
         'employment.scope_insert',
         'employment.scope_read',
@@ -269,8 +274,8 @@ describe('schema inventory', () => {
       ];
       expect(grants.rows).toEqual(expected);
       // This is the table-level inventory, so it stays at twelve: compensation's
-      // 0013 grant is column-qualified and belongs to column_privileges, where
-      // tests/people-compensation.test.ts pins its exact seven columns.
+      // grants are column-qualified and belong to column_privileges, where the
+      // test below pins the exact read and write columns.
 
       const tables = await client.query<{ table_name: string; rls: boolean }>(`
         select t.table_name, c.relrowsecurity as rls
@@ -430,6 +435,127 @@ describe('schema inventory', () => {
           updatable: true,
         });
       }
+    } finally {
+      await client.end();
+    }
+  });
+
+  // 0013_compensation_read.sql and 0014_compensation_write.sql between them give
+  // the runtime one column-qualified command per operation the routes issue, on
+  // exactly the columns those routes name. The shape is the same as person's: no
+  // table-level privilege anywhere, and the columns no route names - the pay
+  // breakdown, the import provenance, the clock - stay owner-only.
+  test('grants the runtime the compensation read and the two write commands by column only', async () => {
+    const client = await ownerClient();
+    try {
+      // A column grant is not a table privilege, and there is no DELETE grant to
+      // find at any level: a salary row is superseded by a later one, never erased.
+      const tablePrivileges = await client.query<{
+        privilege: string;
+        allowed: boolean;
+      }>(`
+        select p as privilege,
+               has_table_privilege('saas_runtime', 'public.compensation', p) as allowed
+          from unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) p
+         order by 1
+      `);
+      expect(tablePrivileges.rows.every((row) => !row.allowed)).toBe(true);
+
+      const columns = await client.query<ColumnGrant>(`
+        select column_name, privilege_type
+          from information_schema.column_privileges
+         where grantee = 'saas_runtime'
+           and table_schema = 'public'
+           and table_name = 'compensation'
+         order by column_name, privilege_type
+      `);
+      expect(columns.rows).toEqual([
+        { column_name: 'ctc_minor', privilege_type: 'INSERT' },
+        { column_name: 'ctc_minor', privilege_type: 'SELECT' },
+        { column_name: 'ctc_minor', privilege_type: 'UPDATE' },
+        { column_name: 'currency', privilege_type: 'INSERT' },
+        { column_name: 'currency', privilege_type: 'SELECT' },
+        { column_name: 'currency', privilege_type: 'UPDATE' },
+        { column_name: 'effective_from', privilege_type: 'INSERT' },
+        { column_name: 'effective_from', privilege_type: 'SELECT' },
+        { column_name: 'effective_from', privilege_type: 'UPDATE' },
+        { column_name: 'effective_to', privilege_type: 'INSERT' },
+        { column_name: 'effective_to', privilege_type: 'SELECT' },
+        { column_name: 'effective_to', privilege_type: 'UPDATE' },
+        { column_name: 'id', privilege_type: 'INSERT' },
+        { column_name: 'id', privilege_type: 'SELECT' },
+        { column_name: 'pay_frequency', privilege_type: 'INSERT' },
+        { column_name: 'pay_frequency', privilege_type: 'SELECT' },
+        { column_name: 'pay_frequency', privilege_type: 'UPDATE' },
+        { column_name: 'person_id', privilege_type: 'INSERT' },
+        { column_name: 'person_id', privilege_type: 'SELECT' },
+        { column_name: 'tenant_id', privilege_type: 'INSERT' },
+      ]);
+
+      const counts = await client.query<{ privilege_type: string; total: string }>(`
+        select privilege_type, count(*)::text as total
+          from information_schema.column_privileges
+         where grantee = 'saas_runtime'
+           and table_schema = 'public'
+           and table_name = 'compensation'
+         group by privilege_type
+         order by privilege_type
+      `);
+      expect(counts.rows).toEqual([
+        { privilege_type: 'INSERT', total: '8' },
+        { privilege_type: 'SELECT', total: '7' },
+        { privilege_type: 'UPDATE', total: '5' },
+      ]);
+
+      // The row's identity and its owner are stated once, at insert: a create
+      // cannot be re-parented onto another person or another tenant, which is the
+      // same rule person's id and tenant_id follow above.
+      const identity = await client.query<{ privilege: string; allowed: boolean }>(`
+        select 'update id' as privilege,
+               has_column_privilege('saas_runtime', 'public.compensation', 'id', 'UPDATE') as allowed
+        union all
+        select 'update person_id',
+               has_column_privilege('saas_runtime', 'public.compensation', 'person_id', 'UPDATE')
+        union all
+        select 'update tenant_id',
+               has_column_privilege('saas_runtime', 'public.compensation', 'tenant_id', 'UPDATE')
+        union all
+        select 'insert tenant_id',
+               has_column_privilege('saas_runtime', 'public.compensation', 'tenant_id', 'INSERT')
+        union all
+        select 'delete row',
+               has_table_privilege('saas_runtime', 'public.compensation', 'DELETE')
+        order by 1
+      `);
+      expect(identity.rows).toEqual([
+        { privilege: 'delete row', allowed: false },
+        { privilege: 'insert tenant_id', allowed: true },
+        { privilege: 'update id', allowed: false },
+        { privilege: 'update person_id', allowed: false },
+        { privilege: 'update tenant_id', allowed: false },
+      ]);
+
+      // The jsonb pay breakdown stays ungranted, and so do the provenance and
+      // clock columns: a salary write names five values and nothing else.
+      const restricted = await client.query<{
+        column_name: string;
+        selectable: boolean;
+        insertable: boolean;
+        updatable: boolean;
+      }>(`
+        select c as column_name,
+               has_column_privilege('saas_runtime', 'public.compensation', c, 'SELECT') as selectable,
+               has_column_privilege('saas_runtime', 'public.compensation', c, 'INSERT') as insertable,
+               has_column_privilege('saas_runtime', 'public.compensation', c, 'UPDATE') as updatable
+          from unnest(array[
+            'structure', 'source_system', 'source_id', 'import_batch_id',
+            'imported_at', 'created_at', 'updated_at'
+          ]) c
+         order by 1
+      `);
+      expect(restricted.rows.every((row) => !row.selectable && !row.insertable && !row.updatable)).toBe(
+        true,
+      );
     } finally {
       await client.end();
     }

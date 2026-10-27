@@ -178,8 +178,7 @@ export const COMPENSATION_PAY_FREQUENCIES = [
 export type CompensationPayFrequency =
   (typeof COMPENSATION_PAY_FREQUENCIES)[number];
 
-// One stored compensation row, read-only. There is deliberately no create or
-// update input in this file: no route writes compensation yet.
+// One stored compensation row.
 //
 // ctcMinor is the value of the ctc_minor column exactly as stored, in minor
 // units of `currency`. The schema does not say whether it is an annual
@@ -210,4 +209,48 @@ export type CompensationItem = {
 export type CompensationListResponse = {
   items: CompensationItem[];
   total: number;
+};
+
+// ctc_minor is a PostgreSQL bigint, so a JavaScript number can only carry it
+// exactly up to Number.MAX_SAFE_INTEGER. The route takes that as the upper bound
+// of a request: a figure above it is refused rather than rounded, because a
+// silently rounded salary is worse than a rejected one. The screen reads the
+// same number so it never offers a value the route will refuse.
+export const COMPENSATION_CTC_MINOR_MAX = Number.MAX_SAFE_INTEGER;
+
+// What a create accepts. There is no personId - it comes from the path - and no
+// id, tenant, structure or import column: the runtime may write the eight
+// columns named in its INSERT grant and nothing else, so this contract has no
+// way to name a cost structure, a source system or a timestamp.
+//
+// The two fields the table always requires have no optional marker: effectiveFrom
+// and ctcMinor must be sent, and a row cannot exist without a currency or a pay
+// frequency. effectiveTo is the one genuinely absent-tolerant field - no key and
+// an explicit null both mean an open-ended row.
+//
+// currency is an ISO 4217 code, and the route insists on the three upper-case
+// ASCII letters the schema's convention expects: it never upper-cases a value for
+// the caller, so "inr" is refused rather than quietly stored as "INR".
+export type CompensationCreateInput = {
+  effectiveFrom: string;
+  effectiveTo?: string | null;
+  ctcMinor: number;
+  currency: string;
+  payFrequency: CompensationPayFrequency;
+};
+
+// Partial by design, like the identity and employment patches: an absent key
+// means "unchanged", so a caller cannot clear a field it never intended to
+// touch. All five keys are individually optional here because a row always has
+// values for the three that create requires - a patch that omits them keeps
+// them, not empties them. null clears effectiveTo only; the table's CHECKs leave
+// no way to store a null amount, currency or frequency, so a null for those is
+// refused before it reaches SQL. At least one key is required, and a patch that
+// changes nothing writes nothing.
+export type CompensationUpdateInput = {
+  effectiveFrom?: string;
+  effectiveTo?: string | null;
+  ctcMinor?: number;
+  currency?: string;
+  payFrequency?: CompensationPayFrequency;
 };

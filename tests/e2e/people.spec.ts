@@ -117,11 +117,10 @@ test.beforeAll(async () => {
       [fixtures.a.tenantId, fixtures.a.legalEntityId],
     );
 
-    // A salary history written owner-side. Nothing in this build can write
-    // compensation through a route, so the rows the read is shown against have to
-    // arrive the way an operator's own SQL would. It hangs off the directory row
-    // the shared fixtures already made, which keeps the person count the journeys
-    // assert exactly as it was.
+    // A salary history written owner-side, so the read path has rows to show
+    // before this journey's own write steps add one. It hangs off the directory
+    // row the shared fixtures already made, which keeps the person count the
+    // journeys assert exactly as it was.
     const salaryPerson = fixtures.exportPeople[0];
     if (!salaryPerson) {
       throw new Error('The e2e salary person row is missing from the fixtures');
@@ -510,9 +509,10 @@ test('signs in, searches, creates and edits the directory, gates People and pers
   await employmentPanel.getByRole('button', { name: 'Close' }).click();
   await expect(employmentPanel).toHaveCount(0);
 
-  // Compensation: the same row-action shape as the employment history, but a
-  // read with no write behind it. The owner's role holds
-  // people.compensation.read, so the action is offered.
+  // Compensation: the same row-action shape as the employment history, and the
+  // same write pattern. The owner's role holds both people.compensation.read and
+  // people.compensation.write, so the action is offered and the panel carries the
+  // controls that use the write.
   const compensation = page.locator('[aria-labelledby="compensation-panel-title"]');
   await directory.getByRole('button', { name: 'Compensation Ada' }).click();
   await expect(compensation).toHaveCount(1);
@@ -543,7 +543,20 @@ test('signs in, searches, creates and edits the directory, gates People and pers
     salary.getByRole('cell', { name: 'Monthly', exact: true }),
   ).toBeVisible();
 
-  // A four-column history inside a panel: it has to fold within its own
+  // This member holds the write, so the history carries its Actions column: the
+  // four data columns the read renders, plus one control per row.
+  await expect(salary.getByRole('columnheader')).toHaveCount(5);
+  await expect(
+    salary.getByRole('columnheader', { name: 'Actions', exact: true }),
+  ).toHaveCount(1);
+  await expect(
+    salary.getByRole('button', { name: 'Edit compensation from 2024-04-01', exact: true }),
+  ).toHaveCount(1);
+  await expect(
+    salary.getByRole('button', { name: 'Edit compensation from 2023-04-01', exact: true }),
+  ).toHaveCount(1);
+
+  // A five-column history inside a panel: it has to fold within its own
   // scroller rather than widen the page, so the same three viewports the rest of
   // the journey uses are checked with the panel open, before the width the
   // remaining steps run at is restored.
@@ -553,30 +566,136 @@ test('signs in, searches, creates and edits the directory, gates People and pers
   }
   await page.setViewportSize({ width: 1280, height: 900 });
 
-  // The panel is read-only in fact as well as in wording: the only control it
-  // offers is the one that closes it, and the note says what the build does not
-  // do rather than implying a salary can be changed.
-  await expect(
-    compensation.getByRole('button', { name: /Add|Save|Edit|New|Remove|Delete/ }),
-  ).toHaveCount(0);
+  // Nothing is editable until a control is pressed: with the panel closed there
+  // is no field on the screen, and the only buttons are the two row edits, the
+  // add button and the close button. There is no delete control at any point -
+  // the route does not exist, so the screen offers none.
   await expect(compensation.locator('input, select, textarea')).toHaveCount(0);
+  await expect(
+    compensation.getByRole('button', { name: 'Add compensation', exact: true }),
+  ).toHaveCount(1);
+  await expect(
+    compensation.getByRole('button', { name: /Remove|Delete|New salary/i }),
+  ).toHaveCount(0);
   await expect(compensation.locator('.compensation-note')).toContainText(
-    'Compensation is read-only in this build.',
+    'No record can be deleted',
   );
   await expect(compensation.locator('.compensation-note')).toContainText(
     'not a monthly or annual salary worked out from it',
   );
+  await expect(compensation.locator('.compensation-note')).not.toContainText('read-only');
 
   await compensation.getByRole('button', { name: 'Close' }).click();
   await expect(compensation).toHaveCount(0);
   // The figure belongs to this panel alone: the directory row never carried it.
   await expect(directory.getByText('12,345.67')).toHaveCount(0);
 
-  // A person with no history is an empty read, not an error.
+  // A person with no history is an empty read, and for this member the empty
+  // panel is where a write starts: the add control is offered with nothing to
+  // edit, and the first saved row is the row that closes the form.
   await directory.getByRole('button', { name: 'Compensation Nadia Kaur' }).click();
   await expect(
     compensation.getByText('No compensation is recorded for this person yet.'),
   ).toBeVisible();
+  await expect(compensation.getByRole('table')).toHaveCount(0);
+  await expect(
+    compensation.getByRole('button', { name: /Edit compensation/ }),
+  ).toHaveCount(0);
+
+  await compensation.getByRole('button', { name: 'Add compensation', exact: true }).click();
+  const salaryForm = page.getByRole('form', { name: 'Add compensation' });
+  await expect(salaryForm.getByRole('heading', { name: 'Add compensation' })).toBeVisible();
+  await expect(salaryForm.locator('.field')).toHaveCount(5);
+  await expect(salaryForm.locator('.people-form-note')).toContainText(
+    'Nothing is annualised or prorated',
+  );
+  // The submit is gated on the three required values, before any request is made.
+  await expect(salaryForm.getByRole('button', { name: 'Save compensation' })).toBeDisabled();
+
+  await page.locator('#compensation-form-effectiveFrom').fill('2025-04-01');
+  await page.locator('#compensation-form-ctcMinor').fill('890123');
+  await page.locator('#compensation-form-currency').fill('inr');
+  await expect(salaryForm.getByRole('button', { name: 'Save compensation' })).toBeEnabled();
+  await salaryForm.getByRole('button', { name: 'Save compensation' }).click();
+
+  // The currency is typed, not chosen, and a lower-case code is refused rather
+  // than corrected: the figure is never stored, and the panel says what was wrong
+  // without repeating the amount back.
+  const writeAlert = salaryForm.locator('.form-alert');
+  await expect(writeAlert).toHaveAttribute('role', 'alert');
+  await expect(writeAlert).toContainText('three-letter upper-case currency are required');
+  await expect(salaryForm.locator('.form-alert')).not.toContainText('890123');
+  await expect(
+    compensation.getByText('No compensation is recorded for this person yet.'),
+  ).toBeVisible();
+
+  await page.locator('#compensation-form-currency').fill('INR');
+  await page.locator('#compensation-form-payFrequency').selectOption('semi_monthly');
+  await salaryForm.getByRole('button', { name: 'Save compensation' }).click();
+  const savedSalary = page.locator('.people-saved');
+  await expect(savedSalary).toHaveAttribute('aria-live', 'polite');
+  await expect(savedSalary).toHaveText('Compensation added.');
+  await expect(salaryForm).toHaveCount(0);
+  const nadiaSalary = compensation.getByRole('table', {
+    name: 'Compensation history for Nadia Kaur',
+  });
+  await expect(nadiaSalary.getByRole('rowheader')).toHaveCount(1);
+  await expect(nadiaSalary.getByRole('rowheader', { name: '2025-04-01' })).toBeVisible();
+  await expect(
+    nadiaSalary.getByRole('cell', { name: '8,901.23 INR', exact: true }),
+  ).toBeVisible();
+  await expect(nadiaSalary.getByRole('cell', { name: '—', exact: true })).toBeVisible();
+  await expect(
+    nadiaSalary.getByRole('cell', { name: 'Semi-monthly', exact: true }),
+  ).toBeVisible();
+  // A salary figure belongs to this panel alone: it is not a directory column and
+  // it never reaches the CSV, which this journey checks byte for byte below.
+  await expect(directory.getByText('8,901.23')).toHaveCount(0);
+
+  // The second half of the write: the same row amended in place. Opening the edit
+  // prefills the stored values, so the save stays disabled until something changes,
+  // and the row is re-read from the server rather than rewritten from the form.
+  await nadiaSalary
+    .getByRole('button', { name: 'Edit compensation from 2025-04-01', exact: true })
+    .click();
+  const salaryEdit = page.getByRole('form', { name: 'Edit this compensation' });
+  await expect(salaryEdit.getByRole('heading', { name: 'Edit this compensation' })).toBeVisible();
+  await expect(page.locator('#compensation-form-effectiveFrom')).toHaveValue('2025-04-01');
+  await expect(page.locator('#compensation-form-ctcMinor')).toHaveValue('890123');
+  await expect(page.locator('#compensation-form-currency')).toHaveValue('INR');
+  await expect(page.locator('#compensation-form-payFrequency')).toHaveValue('semi_monthly');
+  await expect(salaryEdit.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+  await expect(salaryEdit.locator('.people-form-note')).toContainText(
+    'amends the stored row in place',
+  );
+
+  await page.locator('#compensation-form-ctcMinor').fill('900000');
+  await page.locator('#compensation-form-effectiveTo').fill('2025-06-30');
+  await salaryEdit.getByRole('button', { name: 'Save changes' }).click();
+  await expect(savedSalary).toHaveText('Compensation updated.');
+  await expect(salaryEdit).toHaveCount(0);
+  await expect(nadiaSalary.getByRole('rowheader')).toHaveCount(1);
+  await expect(
+    nadiaSalary.getByRole('cell', { name: '9,000.00 INR', exact: true }),
+  ).toBeVisible();
+  await expect(
+    nadiaSalary.getByRole('cell', { name: '2025-06-30', exact: true }),
+  ).toBeVisible();
+
+  // Two records opening on one day is refused by the stored unique key, and the
+  // panel explains the correction rule instead of showing a database message.
+  await compensation.getByRole('button', { name: 'Add compensation', exact: true }).click();
+  await page.locator('#compensation-form-effectiveFrom').fill('2025-04-01');
+  await page.locator('#compensation-form-ctcMinor').fill('1');
+  await page.locator('#compensation-form-currency').fill('INR');
+  await salaryForm.getByRole('button', { name: 'Save compensation' }).click();
+  const clash = salaryForm.locator('.form-alert');
+  await expect(clash).toContainText('already has a record opening on that date');
+  await expect(clash).not.toContainText('unique');
+  await salaryForm.getByRole('button', { name: 'Cancel' }).click();
+  await expect(salaryForm).toHaveCount(0);
+  await expect(nadiaSalary.getByRole('rowheader')).toHaveCount(1);
+
   await compensation.getByRole('button', { name: 'Close' }).click();
   await expect(compensation).toHaveCount(0);
 
@@ -733,6 +852,12 @@ test('a member whose role reads People sees the employment history, cannot chang
     directory.getByRole('button', { name: /^Compensation/ }),
   ).toHaveCount(0);
   await expect(page.getByText('12,345.67')).toHaveCount(0);
+  // and with no panel there is nowhere a salary write control could appear: this
+  // member holds neither compensation permission, so neither half of the panel is
+  // reachable.
+  await expect(page.getByRole('button', { name: /Add compensation/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Edit compensation/ })).toHaveCount(0);
+  await expect(page.getByRole('form', { name: /compensation/i })).toHaveCount(0);
 
   // Reading a history is a read, so the row action is here for a reader.
   await directory.getByRole('button', { name: 'Employment Nadia Kaur' }).click();
@@ -758,6 +883,74 @@ test('a member whose role reads People sees the employment history, cannot chang
   await expect(
     employmentPanel.getByRole('button', { name: 'Add employment' }),
   ).toHaveCount(0);
+
+  for (const width of [390, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await noHorizontalOverflow(page);
+  }
+});
+
+// The screen's own read-only branch, on the one axis the built-in roles cannot
+// show: every role that holds people.compensation.read also holds the write, so
+// the panel without its controls is reached here by removing that one permission
+// from the /v1/context answer of the owner's own session. This is presentation
+// evidence only - hiding a control is not authorization, and the refusal a member
+// without the write actually gets is proven against the real gate in
+// tests/people-compensation-write.test.ts.
+test('a member who reads salary history but may not write it sees the panel with no controls', async ({
+  page,
+}) => {
+  const people = requireAccount(peopleAccount, 'People');
+
+  await page.route('**/v1/context', async (route) => {
+    const response = await route.fetch();
+    const context = (await response.json()) as { permissions: string[] };
+    context.permissions = context.permissions.filter(
+      (permission) => permission !== 'people.compensation.write',
+    );
+    await route.fulfill({ response, json: context });
+  });
+
+  await page.goto('/login');
+  await page.locator('#workspace').fill(people.slug);
+  await page.locator('#email').fill(people.email);
+  await page.locator('#password').fill(syntheticPassword);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page).toHaveURL(/\/app\/people$/);
+
+  const directory = page.getByRole('table', { name: 'People directory' });
+  await directory.getByRole('button', { name: 'Compensation Ada' }).click();
+  const compensation = page.locator('[aria-labelledby="compensation-panel-title"]');
+  await expect(compensation).toHaveCount(1);
+  // The read is untouched: the rows still arrive, in the same order, with the
+  // same figures.
+  const salary = compensation.getByRole('table', {
+    name: 'Compensation history for Ada, "Countess"',
+  });
+  await expect(salary.getByRole('rowheader')).toHaveCount(2);
+  await expect(
+    salary.getByRole('cell', { name: '12,345.67 INR', exact: true }),
+  ).toBeVisible();
+
+  // What the write permission decides is the shape of the table and the copy
+  // beneath it: no Actions column, no add or edit control, no field, and a note
+  // that says read-only rather than promising a record can be added.
+  await expect(salary.getByRole('columnheader')).toHaveCount(4);
+  await expect(
+    compensation.getByRole('columnheader', { name: 'Actions' }),
+  ).toHaveCount(0);
+  await expect(compensation.getByRole('button')).toHaveCount(1);
+  await expect(compensation.locator('input, select, textarea')).toHaveCount(0);
+  await expect(compensation.locator('.compensation-note')).toContainText(
+    'Compensation is read-only in this build for you.',
+  );
+  // The honest branch: this member is told who can write, not that nobody can.
+  await expect(compensation.locator('.compensation-note')).toContainText(
+    'A member whose role also holds the pay write',
+  );
+  await expect(compensation.locator('.compensation-note')).not.toContainText(
+    'A record can be added here',
+  );
 
   for (const width of [390, 768, 1440]) {
     await page.setViewportSize({ width, height: 900 });

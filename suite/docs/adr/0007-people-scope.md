@@ -283,3 +283,34 @@ the fail-open system-transaction residual stands exactly as pinned; and `employe
 still refused, here by a permission check that runs before any policy, so the self-scope
 this ADR built continues to have no product path for the person it belongs to. The route
 adds no scope predicate of its own — see [ADR 0011](0011-compensation-read.md) decision 4.
+
+## Amendment — T23 adds the compensation write path (M1 slice 8)
+
+`0014_compensation_write.sql` is the second migration to touch this ADR's layer and the
+first to move a *write* oracle onto a table that previously had only a read one. Its
+executable body is exactly two policies —
+`create policy scope_insert on public.compensation as restrictive for insert with check
+(app.person_in_scope(person_id));` and the matching `scope_update`, which carries the same
+predicate in both its `USING` and its `WITH CHECK` halves — with no `scope_delete`, because
+no `DELETE` is granted on the table and a salary row is superseded rather than erased. The
+catalogue figures move again: 14 migrations, 277 policies (66 permissive, 211 restrictive)
+and eleven `scope_*` names across three tables, of which `compensation` now holds three.
+
+The predicate this slice puts on `compensation` is the one 0012 already used for the
+employment writes, not the one 0013 put on the same table for its read. That asymmetry is
+this ADR's resolution order showing on a third table: `app.person_visible` keeps a member's
+own linked row readable, `app.person_in_scope` deliberately has no such exception, so a
+person a caller may see is not automatically a person it may price. The route asks the
+write oracle explicitly, before the body, and the policy is the second line rather than the
+only one — `person_id` is in neither write column list, so re-parenting a row is refused by
+the grant before `WITH CHECK` is reached, and the two `scope_insert` policy refusals an
+out-of-scope insert and an employee insert produce, the `42501` the re-parenting `UPDATE`
+produces and the `403 SCOPE_DENIED` the routes answer with in
+`tests/people-compensation-write.test.ts` pin the halves separately. See [ADR
+0012](0012-compensation-write.md) decisions 2, 3 and 5.
+
+What still stands from the original text: the resolution order is unchanged, no helper was
+added or re-granted, `membership_scope` remains unreachable to the runtime role, the
+fail-open system-transaction residual is untouched, and scope is still authored only
+through the owner connection — this slice makes a salary row writable inside whatever scope
+an operator has already drawn, and adds no way to draw one.

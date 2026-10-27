@@ -21,6 +21,7 @@ type Snapshot = {
   memberships: Record<string, unknown>[];
   entitlements: Record<string, unknown>[];
   people: Record<string, unknown>[];
+  compensations: Record<string, unknown>[];
   events: Record<string, unknown>[];
 };
 
@@ -94,6 +95,13 @@ async function snapshot(client: Client): Promise<Snapshot> {
          from person order by employee_code`,
     ],
     [
+      'compensations',
+      `select id, tenant_id, person_id, effective_from, effective_to, ctc_minor,
+              currency, pay_frequency, structure, source_system, source_id,
+              import_batch_id, imported_at
+         from compensation order by person_id, effective_from`,
+    ],
+    [
       'events',
       `select id, tenant_id, type, aggregate_type, aggregate_id, payload,
               occurred_at, published_at, attempts, last_error
@@ -107,6 +115,7 @@ async function snapshot(client: Client): Promise<Snapshot> {
     memberships: [],
     entitlements: [],
     people: [],
+    compensations: [],
     events: [],
   };
   for (const [key, sql] of queries) {
@@ -159,7 +168,7 @@ async function insertPreUpgradeRows(client: Client): Promise<{ tenantA: string; 
     [tenantIds[0]],
   );
 
-  await client.query(
+  const person = await client.query<{ id: string }>(
     `insert into person
        (tenant_id, employee_code, first_name, last_name, display_name, work_email,
         phone, personal_email, date_of_birth, gender, designation, status,
@@ -167,8 +176,25 @@ async function insertPreUpgradeRows(client: Client): Promise<{ tenantA: string; 
      values ($1, 'ROLL-001', 'Ada', 'Lovelace', 'Ada Lovelace',
              'rollforward_person@example.test', '+1 555 0100', 'ada@example.test',
              date '1980-01-02', 'female', 'Engineer', 'active',
-             'full_time', null, null)`,
+             'full_time', null, null)
+     returning id`,
     [tenantIds[0]],
+  );
+
+  // A salary row written before the upgrade, by an operator's SQL rather than a
+  // route: 0014_compensation_write.sql lands policies and column grants over a
+  // table that already holds pay history, and the row it preserves is part of the
+  // same proof as the person beside it.
+  const personId = person.rows[0]?.id;
+  if (!personId) {
+    throw new Error('Could not create the roll-forward person');
+  }
+  await client.query(
+    `insert into compensation
+       (tenant_id, person_id, effective_from, effective_to, ctc_minor, currency,
+        pay_frequency)
+     values ($1, $2, date '2024-01-01', null, 1234567, 'ZZZ', 'monthly')`,
+    [tenantIds[0], personId],
   );
 
   const events = [
@@ -311,11 +337,12 @@ afterAll(async () => {
 
 describe('migration roll-forward over populated data', () => {
   test('applies only the newest file while the earlier ones are skipped by checksum', () => {
-    expect(allFiles).toHaveLength(13);
-    expect(newestFile).toBe('0013_compensation_read.sql');
-    expect(previousFiles).toHaveLength(12);
+    expect(allFiles).toHaveLength(14);
+    expect(newestFile).toBe('0014_compensation_write.sql');
+    expect(previousFiles).toHaveLength(13);
     expect(previousFiles).toContain('0011_outbox.sql');
     expect(previousFiles).toContain('0012_people_scope.sql');
+    expect(previousFiles).toContain('0013_compensation_read.sql');
     expect(upgraded().applied).toEqual([newestFile]);
     expect(upgraded().skipped).toEqual(previousFiles);
   });
@@ -357,6 +384,11 @@ describe('migration roll-forward over populated data', () => {
     expect(after.memberships).toEqual(before.memberships);
     expect(after.entitlements).toEqual(before.entitlements);
     expect(after.people).toEqual(before.people);
+    // 0014 changes no column and no row: the salary history the pre-upgrade
+    // database already held comes through with its amount, its currency and its
+    // ungranted structure jsonb untouched.
+    expect(after.compensations).toEqual(before.compensations);
+    expect(after.compensations).toHaveLength(1);
     expect(after.events).toEqual(before.events);
   });
 
@@ -587,7 +619,7 @@ describe('migration roll-forward over populated data', () => {
     expect(await read(deterministicUuid('rollforward_absent_user'))).toBe(0);
   });
 
-  test('installs the scope helpers, the eight 0012 policies and the one 0013 read policy on the upgraded database', async () => {
+  test('installs the scope helpers, the eight 0012 policies and the three compensation scope policies on the upgraded database', async () => {
     const client = await ownerClient();
     try {
       const functions = await client.query<{ proname: string; owner: string; config: string[] }>(
@@ -628,22 +660,24 @@ describe('migration roll-forward over populated data', () => {
       expect(policies.rows).toHaveLength(8);
       expect(policies.rows.every((row) => row.permissive === false)).toBe(true);
 
-      // 0013_compensation_read.sql is the file this roll-forward actually applies,
-      // so the same proof covers it: over a database that already holds rows, the
-      // one compensation scope policy lands restrictive, for select only, naming
-      // the same read oracle the directory and the employment history use. There
-      // is no insert, update or delete policy beside it because no route writes
-      // compensation yet.
+      // 0014_compensation_write.sql is the file this roll-forward actually applies,
+      // so the same proof covers it: over a database that already holds salary
+      // rows, the 0013 read policy is untouched and the two write policies land
+      // restrictive, each naming the write oracle rather than the read one, with
+      // the update carrying a WITH CHECK as well as a USING. There is still no
+      // delete policy, because there is still no delete privilege.
       const compensation = await client.query<{
         table_name: string;
         polname: string;
         command: string;
         permissive: boolean;
         using_clause: string | null;
+        check_clause: string | null;
       }>(
         `select c.relname as table_name, p.polname, p.polcmd::text as command,
                 p.polpermissive as permissive,
-                pg_get_expr(p.polqual, p.polrelid) as using_clause
+                pg_get_expr(p.polqual, p.polrelid) as using_clause,
+                pg_get_expr(p.polwithcheck, p.polrelid) as check_clause
            from pg_policy p
            join pg_class c on c.oid = p.polrelid
           where c.relname = 'compensation' and p.polname like 'scope_%'
@@ -652,12 +686,50 @@ describe('migration roll-forward over populated data', () => {
       expect(compensation.rows).toEqual([
         {
           table_name: 'compensation',
+          polname: 'scope_insert',
+          command: 'a',
+          permissive: false,
+          using_clause: null,
+          check_clause: 'app.person_in_scope(person_id)',
+        },
+        {
+          table_name: 'compensation',
           polname: 'scope_read',
           command: 'r',
           permissive: false,
           using_clause: 'app.person_visible(person_id)',
+          check_clause: null,
+        },
+        {
+          table_name: 'compensation',
+          polname: 'scope_update',
+          command: 'w',
+          permissive: false,
+          using_clause: 'app.person_in_scope(person_id)',
+          check_clause: 'app.person_in_scope(person_id)',
         },
       ]);
+
+      // The write grants arrive with the write policies, in the same upgrade: a
+      // database that has one and not the other would be the failure this pair
+      // exists to prevent.
+      const runtimeWrite = await client.query<{
+        insert_person: boolean;
+        update_amount: boolean;
+        update_person: boolean;
+        delete: boolean;
+      }>(
+        `select has_column_privilege('saas_runtime', 'public.compensation', 'person_id', 'INSERT') as insert_person,
+                has_column_privilege('saas_runtime', 'public.compensation', 'ctc_minor', 'UPDATE') as update_amount,
+                has_column_privilege('saas_runtime', 'public.compensation', 'person_id', 'UPDATE') as update_person,
+                has_table_privilege('saas_runtime', 'public.compensation', 'DELETE') as delete`,
+      );
+      expect(runtimeWrite.rows[0]).toEqual({
+        insert_person: true,
+        update_amount: true,
+        update_person: false,
+        delete: false,
+      });
 
       // The pre-existing person read still works for the owner path, which is
       // what the snapshot above proved: nothing was dropped or weakened.

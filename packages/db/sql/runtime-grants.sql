@@ -74,17 +74,41 @@ grant select (
 ) on table public.org_unit to saas_runtime;
 
 -- Compensation history. Column-only SELECT on exactly the seven columns the
--- read route names; no table-level grant, no INSERT, UPDATE or DELETE, and no
--- tenant_id. The structure jsonb stays ungranted because it is where an
--- unreviewed pay breakdown would live, and the source, import and timestamp
--- columns stay owner-only for the same reason they do on person. Queries reach
--- these rows by the person they hang off and rely on the composite
--- (tenant_id, person_id) foreign key, the tenant_isolation policy from 0002 and
--- the restrictive scope_read policy from 0013_compensation_read.sql; the route
--- never filters on tenant_id itself. Compensation administration is not built,
--- so the runtime role has no write path to this table.
+-- read route names; no table-level grant, and no tenant_id. The structure jsonb
+-- stays ungranted because it is where an unreviewed pay breakdown would live,
+-- and the source, import and timestamp columns stay owner-only for the same
+-- reason they do on person. Queries reach these rows by the person they hang off
+-- and rely on the composite (tenant_id, person_id) foreign key, the
+-- tenant_isolation policy from 0002 and the restrictive scope_read policy from
+-- 0013_compensation_read.sql; the route never filters on tenant_id itself.
 grant select (
   id, person_id, effective_from, effective_to, ctc_minor, currency, pay_frequency
+) on table public.compensation to saas_runtime;
+
+-- The compensation write, and exactly the columns the two write routes need.
+-- There is still no table-level privilege: each command is granted per column,
+-- so the runtime cannot write a column no route names. id is insertable so a
+-- create can name the row it made; unlike person, this table's scope policies
+-- evaluate their oracle against a person_id that already exists rather than
+-- against the new row's own id, so INSERT ... RETURNING is not refused here
+-- (0008 refuses it on person because that policy reads the new row's own id). The route still generates the id and
+-- reads the row back, so a write answer is built from the same select fragments
+-- as the list. tenant_id and person_id are
+-- insertable because a new row must state whose pay it is, and both are
+-- deliberately absent from UPDATE: person_id in particular must not become a way
+-- to re-parent a salary row across the directory, which is also what the
+-- restrictive scope_update policy's WITH CHECK clause in
+-- 0014_compensation_write.sql refuses. There is no DELETE grant at all: a
+-- compensation row is superseded, never erased, and 0014 therefore adds no
+-- delete policy for a command no role can execute. RLS remains the tenant,
+-- module and scope boundary for every write.
+grant insert (
+  id, tenant_id, person_id, effective_from, effective_to, ctc_minor, currency,
+  pay_frequency
+) on table public.compensation to saas_runtime;
+
+grant update (
+  effective_from, effective_to, ctc_minor, currency, pay_frequency
 ) on table public.compensation to saas_runtime;
 
 -- Append-only audit writer. No SELECT, UPDATE or DELETE is granted.

@@ -835,6 +835,79 @@ describe('people scope schema and privileges', () => {
     });
   });
 
+  test('counts every scope policy in the catalogue: eleven names over three tables', async () => {
+    await withOwner(async (client) => {
+      // The scope layer as one set, because the number of names is what tells a
+      // future slice that a new person-child table needs its own reviewed
+      // migration: person and employment each carry four (0012) and compensation
+      // carries three (0013 read, 0014 insert and update). Compensation has no
+      // delete name on purpose - there is no delete privilege on the table, so a
+      // delete policy would govern a command no role can execute.
+      const scope = await client.query<{ table_name: string; polname: string }>(`
+        select c.relname as table_name, p.polname
+          from pg_policy p
+          join pg_class c on c.oid = p.polrelid
+         where p.polname like 'scope_%'
+         order by c.relname, p.polname
+      `);
+      expect(scope.rows).toEqual([
+        { table_name: 'compensation', polname: 'scope_insert' },
+        { table_name: 'compensation', polname: 'scope_read' },
+        { table_name: 'compensation', polname: 'scope_update' },
+        { table_name: 'employment', polname: 'scope_delete' },
+        { table_name: 'employment', polname: 'scope_insert' },
+        { table_name: 'employment', polname: 'scope_read' },
+        { table_name: 'employment', polname: 'scope_update' },
+        { table_name: 'person', polname: 'scope_delete' },
+        { table_name: 'person', polname: 'scope_insert' },
+        { table_name: 'person', polname: 'scope_read' },
+        { table_name: 'person', polname: 'scope_update' },
+      ]);
+      expect(new Set(scope.rows.map((row) => row.table_name))).toEqual(
+        new Set(['compensation', 'employment', 'person']),
+      );
+
+      // Every one of them is restrictive, so a scope name can only ever narrow
+      // the tenant and module layers in front of it, and the whole catalogue
+      // stays at one permissive policy per RLS table.
+      const permissive = await client.query<{ table_name: string; polname: string }>(`
+        select c.relname as table_name, p.polname
+          from pg_policy p
+          join pg_class c on c.oid = p.polrelid
+         where p.polname like 'scope_%' and p.polpermissive
+      `);
+      expect(permissive.rows).toEqual([]);
+
+      // The 0014 pair evaluates the write oracle for every person-child write in
+      // the catalogue: three names, one per command, all spelling the predicate
+      // the same way. The directory reads its own id instead, because a person row
+      // carries its placement on the row itself. The two scope_delete names are
+      // deliberately outside this count - they are the fourth and fifth rows of the
+      // eleven above, and compensation has no delete name at all.
+      const writeOracle = scope.rows.filter(
+        (row) => row.polname === 'scope_insert' || row.polname === 'scope_update',
+      );
+      expect(writeOracle).toHaveLength(6);
+      const clauses = await client.query<{ named: string }>(`
+        select c.relname || '.' || p.polname || '=' ||
+               coalesce('using ' || pg_get_expr(p.polqual, p.polrelid), 'no using') || '+' ||
+               coalesce('check ' || pg_get_expr(p.polwithcheck, p.polrelid), 'no check') as named
+          from pg_policy p
+          join pg_class c on c.oid = p.polrelid
+         where p.polname in ('scope_insert', 'scope_update')
+         order by 1
+      `);
+      expect(clauses.rows.map((row) => row.named)).toEqual([
+        'compensation.scope_insert=no using+check app.person_in_scope(person_id)',
+        'compensation.scope_update=using app.person_in_scope(person_id)+check app.person_in_scope(person_id)',
+        'employment.scope_insert=no using+check app.person_in_scope(person_id)',
+        'employment.scope_update=using app.person_in_scope(person_id)+check app.person_in_scope(person_id)',
+        'person.scope_insert=no using+check app.person_placement_in_scope(legal_entity_id, org_unit_id)',
+        'person.scope_update=using app.person_in_scope(id)+check app.person_placement_in_scope(legal_entity_id, org_unit_id)',
+      ]);
+    });
+  });
+
   test('defines every helper as owner-owned with a pinned empty search path', async () => {
     await withOwner(async (client) => {
       const functions = await client.query<{

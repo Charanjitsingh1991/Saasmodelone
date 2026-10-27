@@ -355,6 +355,7 @@ describe('API request layer', () => {
           'people.read',
           'people.write',
           'people.compensation.read',
+          'people.compensation.write',
           'work.read',
           'work.write',
         ],
@@ -458,6 +459,7 @@ describe('API request layer', () => {
           'people.read',
           'people.write',
           'people.compensation.read',
+          'people.compensation.write',
           'work.read',
           'work.write',
         ],
@@ -522,7 +524,12 @@ describe('API request layer', () => {
         userId: c.userId,
         tenantId: c.tenantId,
         role: 'hr',
-        permissions: ['people.read', 'people.write', 'people.compensation.read'],
+        permissions: [
+          'people.read',
+          'people.write',
+          'people.compensation.read',
+          'people.compensation.write',
+        ],
         switchAccess: false,
         modules: [
           {
@@ -586,7 +593,12 @@ describe('API request layer', () => {
         userId: workHr.userId,
         tenantId: workHr.tenantId,
         role: 'hr',
-        permissions: ['people.read', 'people.write', 'people.compensation.read'],
+        permissions: [
+          'people.read',
+          'people.write',
+          'people.compensation.read',
+          'people.compensation.write',
+        ],
         switchAccess: true,
         modules: [],
       });

@@ -62,7 +62,7 @@ afterAll(async () => {
 describe('local database harness', () => {
   test('fresh apply records every baseline migration and creates the schema', async () => {
     const expected = await listSqlFiles(migrationsDir);
-    expect(expected).toHaveLength(13);
+    expect(expected).toHaveLength(14);
 
     const result = await migrate({ ownerUrl: db().ownerUrl });
     expect(result.applied).toEqual(expected);

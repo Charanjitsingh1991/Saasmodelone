@@ -247,9 +247,11 @@ async function newSubject(
   });
 }
 
-/** A salary history the product did not write. There is no compensation write
- *  route in this milestone - that is the whole point of the slice - so the rows
- *  a read is tested against have to be seeded the way an operator's SQL would.
+/** A salary history the read route did not write. Seeding owner-side is how the
+ *  read half is tested independently of the write half: the rows exist before any
+ *  POST runs, so a read answer cannot be a row this file just created. The write
+ *  routes are covered by tests/people-compensation-write.test.ts; this file never
+ *  calls them.
  *  The caller names the tenant, because a seeded person lives in more than one
  *  and tenant_id is not derivable from the runtime role. */
 async function newCompensation(
@@ -316,7 +318,7 @@ async function withApp<T>(fn: (app: TestServer) => Promise<T>): Promise<T> {
 }
 
 type SendOptions = {
-  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
   url: string;
   cookie?: string;
   csrf?: string | null;
@@ -513,9 +515,9 @@ beforeAll(async () => {
       }),
     };
 
-    // Histories that must stay invisible to tenant a: the employee's own row (the
-    // self exception exists at the SQL level but the role gate answers first) and
-    // a row in a second, People-entitled tenant.
+    // Histories that must stay invisible to tenant a: a row on the employee
+    // fixture's person (whose role does not hold the permission at all), and a
+    // row in a second, People-entitled tenant.
     await newCompensation(fx().employee.tenantId, fx().employee.personId, {
       effectiveFrom: '2024-04-01',
       ctcMinor: 5555001,
@@ -753,14 +755,17 @@ describe('Compensation history read', () => {
     }
   });
 
-  test('refuses an employee who asks for their own salary history', async () => {
+  test('refuses the employee role at the gate, before any row is read', async () => {
     const employee = fx().employee;
     const before = await denialRows(employee.tenantId);
 
     await withApp(async (app) => {
-      // The person id is the caller's own directory row and app.person_visible
-      // answers yes for it. The permission gate is what answers, so the route
-      // never reaches the row.
+      // The person id is the employee fixture's own directory row, which
+      // createAccessFixtures leaves unlinked to any user id, so
+      // app.person_visible would answer no for this caller anyway. It is never
+      // asked: the permission gate is what answers, so the route stops before the
+      // row. (The linked-row case, where the read oracle does answer yes, is
+      // covered in tests/people-compensation-write.test.ts.)
       const response = await history(app, 'employee', employee.personId);
       expect(response.statusCode).toBe(403);
       expect(response.payload).toEqual({
@@ -920,7 +925,7 @@ describe('Compensation history read', () => {
     });
   });
 
-  test('writes nothing and records no compensation route beyond the read', async () => {
+  test('writes nothing from the read route, and offers no delete path', async () => {
     const a = fx().a;
     const s = structure();
     const subject = await newSubject(s.entityA);
@@ -928,18 +933,26 @@ describe('Compensation history read', () => {
 
     await withApp(async (app) => {
       // The person has no history at all, so any answer that carried a row would
-      // have had to invent one.
+      // have had to invent one. The GET is the read half of this slice and it
+      // writes nothing: the same call twice gives the same empty answer.
       const read = await history(app, 'a', subject.id);
       expect(read.statusCode).toBe(200);
       expect(read.list).toEqual({ items: [], total: 0 });
 
-      // There is no compensation write route in this slice. Each method below is
-      // Fastify's own route-not-found answer, which is a different shape from any
-      // decision the product makes.
-      for (const method of ['POST', 'PATCH', 'DELETE'] as const) {
+      // A salary row is superseded by a later one, never erased, so there is no
+      // DELETE route and no DELETE verb anywhere on this path. Each method below
+      // is Fastify's own route-not-found answer, which is a different shape from
+      // any decision the product makes. The create and amend verbs are not in
+      // this list: 0014 gave them routes of their own, under their own
+      // permission, and tests/people-compensation-write.test.ts covers them.
+      for (const [method, url] of [
+        ['DELETE', `/v1/people/${subject.id}/compensations`],
+        ['DELETE', `/v1/people/${subject.id}/compensations/${randomUUID()}`],
+        ['PUT', `/v1/people/${subject.id}/compensations`],
+      ] as const) {
         const response = await send(app, {
           method,
-          url: `/v1/people/${subject.id}/compensations`,
+          url,
           cookie: session('a').cookie,
           csrf: session('a').csrfToken,
           body: {},
@@ -985,7 +998,7 @@ describe('Compensation history read', () => {
 });
 
 describe('Compensation read inventory', () => {
-  test('lands the thirteenth migration and no other ledger change', async () => {
+  test('lands the thirteenth migration and leaves the ledger otherwise unchanged', async () => {
     const ledger = await withOwner(async (client) => {
       const result = await client.query<{ version: string; status: string }>(
         `select version, status from infra.schema_migration
@@ -995,13 +1008,17 @@ describe('Compensation read inventory', () => {
       return result.rows;
     });
 
-    expect(ledger).toHaveLength(13);
+    // Fourteen versions are applied, and 0013 is the thirteenth of them. The
+    // fourteenth is this table's write half - 0014_compensation_write.sql, pinned
+    // by tests/people-compensation-write.test.ts, which also proves it is the
+    // newest and that nothing else in the ledger moved.
+    expect(ledger).toHaveLength(14);
     expect(ledger.every((row) => row.status === 'applied')).toBe(true);
     expect(ledger[0]?.version).toBe('0001_core.sql');
-    expect(ledger[ledger.length - 1]?.version).toBe('0013_compensation_read.sql');
+    expect(ledger[12]?.version).toBe('0013_compensation_read.sql');
   });
 
-  test('gives the runtime seven compensation columns and no table privilege', async () => {
+  test('gives the runtime the compensation columns it needs and no table privilege', async () => {
     await withOwner(async (client) => {
       const columns = await client.query<{ column_name: string }>(
         `select distinct column_name
@@ -1009,10 +1026,17 @@ describe('Compensation read inventory', () => {
           where grantee = 'saas_runtime' and table_name = 'compensation'
           order by 1`,
       );
-      expect(columns.rows.map((row) => row.column_name)).toEqual(COMPENSATION_COLUMNS);
+      // The seven the read answers with, plus tenant_id, which a create has to
+      // state. tests/schema-inventory.test.ts and
+      // tests/people-compensation-write.test.ts pin which command sits on which
+      // column; this test only proves the reach is still column-shaped.
+      expect(columns.rows.map((row) => row.column_name)).toEqual([
+        ...COMPENSATION_COLUMNS,
+        'tenant_id',
+      ].sort());
 
-      // The twelve table-level privileges are unchanged: a column-only grant does
-      // not appear in role_table_grants, and compensation is absent from it.
+      // The table-level grants are unchanged: a column-only grant does not appear
+      // in role_table_grants, and compensation is absent from it.
       const tables = await client.query<{ table_name: string }>(
         `select distinct table_name
            from information_schema.role_table_grants
@@ -1028,8 +1052,8 @@ describe('Compensation read inventory', () => {
         'project',
       ]);
 
-      // A column grant is not a table privilege, and no DML at all: the runtime
-      // cannot insert, change or delete a salary row.
+      // A column grant is not a table privilege, and there is still no DELETE at
+      // any level: the read route cannot write, and no route can erase a row.
       const privileges = await client.query<{ privilege: string; allowed: boolean }>(
         `select p as privilege,
                 has_table_privilege('saas_runtime', 'public.compensation', p) as allowed
@@ -1056,7 +1080,7 @@ describe('Compensation read inventory', () => {
     });
   });
 
-  test('adds one restrictive read policy to compensation and no write policy', async () => {
+  test('pins the restrictive compensation read policy and the absence of any delete policy', async () => {
     await withOwner(async (client) => {
       const policies = await client.query<{
         polname: string;
@@ -1072,13 +1096,23 @@ describe('Compensation read inventory', () => {
           order by p.polname`,
       );
 
-      // Read-only by construction: the one predicate that gates a salary row is
-      // the directory's own visibility oracle, and it is restrictive, so it can
-      // only ever narrow the tenant and module layers in front of it. The
-      // tenant-wide policy and grant inventory stays in
-      // tests/schema-inventory.test.ts and tests/scope.test.ts, which count every
-      // table; this file pins only what 0013 added.
-      expect(policies.rows).toEqual([
+      // Read-only by construction on the read side: the one predicate that gates
+      // which salary rows a member can list is the directory's own visibility
+      // oracle, and it is restrictive, so it can only ever narrow the tenant and
+      // module layers in front of it. The two write policies below it arrived
+      // with 0014 and are pinned there; the tenant-wide policy and grant
+      // inventory stays in tests/schema-inventory.test.ts and tests/scope.test.ts,
+      // which count every table. What this slice still insists on is the absence:
+      // no scope_delete, because a salary row is superseded, never erased.
+      expect(policies.rows.map((row) => row.polname)).toEqual([
+        'scope_insert',
+        'scope_read',
+        'scope_update',
+      ]);
+      expect(policies.rows.filter((row) => row.polcmd === 'd')).toEqual([]);
+      expect(
+        policies.rows.filter((row) => row.polname === 'scope_read'),
+      ).toEqual([
         {
           polname: 'scope_read',
           polcmd: 'r',
@@ -1125,15 +1159,15 @@ describe('Compensation read inventory', () => {
     });
   });
 
-  test('keeps the permission set at five and never names a compensation write', () => {
+  test('keeps the permission set published and never answers a module operation with the compensation read', () => {
     expect(PERMISSIONS).toEqual([
       'people.read',
       'people.write',
       'people.compensation.read',
+      'people.compensation.write',
       'work.read',
       'work.write',
     ]);
-    expect(PERMISSIONS).not.toContain('people.compensation.write');
     // No module operation answers with the compensation permission: only a gate
     // that names it explicitly can ask for it.
     expect(permissionFor('people', 'read')).toBe('people.read');

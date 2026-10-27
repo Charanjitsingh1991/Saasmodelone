@@ -11,22 +11,25 @@ import {
 
 // In PERMISSIONS order, which is the order /v1/context answers in. Salary
 // history comes after both People directory permissions because it is a third
-// question the People module asks, not a variant of either.
+// question the People module asks, not a variant of either, and its write half
+// sits beside the read it belongs to.
 const ALL_PERMISSIONS = [
   'people.read',
   'people.write',
   'people.compensation.read',
+  'people.compensation.write',
   'work.read',
   'work.write',
 ];
 
 const COMPENSATION_READ = 'people.compensation.read';
+const COMPENSATION_WRITE = 'people.compensation.write';
 
 const ROLE_MATRIX: Record<MembershipRole, string[]> = {
   owner: ALL_PERMISSIONS,
   admin: ALL_PERMISSIONS,
-  hr: ['people.read', 'people.write', COMPENSATION_READ],
-  finance: ['people.read', COMPENSATION_READ, 'work.read'],
+  hr: ['people.read', 'people.write', COMPENSATION_READ, COMPENSATION_WRITE],
+  finance: ['people.read', COMPENSATION_READ, COMPENSATION_WRITE, 'work.read'],
   manager: ['people.read', 'work.read', 'work.write'],
   employee: [],
   auditor: ['people.read', 'work.read'],
@@ -46,7 +49,7 @@ describe('authorization policy', () => {
     expect(new Set(MEMBERSHIP_ROLES).size).toBe(7);
   });
 
-  test('publishes the two module operations and the five published permissions', () => {
+  test('publishes the two module operations and the six published permissions', () => {
     expect(MODULE_OPERATIONS).toEqual(['read', 'write']);
     expect(PERMISSIONS).toEqual(ALL_PERMISSIONS);
     expect(new Set(PERMISSIONS).size).toBe(PERMISSIONS.length);
@@ -80,17 +83,49 @@ describe('authorization policy', () => {
       expect(hasPermission(role, COMPENSATION_READ)).toBe(false);
       expect(permissionsForRole(role)).not.toContain(COMPENSATION_READ);
     }
-    // Reading pay is the compensation permission in this milestone. Writing it
-    // does not exist yet, and no role holds a name for it.
-    expect(PERMISSIONS).not.toContain('people.compensation.write');
   });
 
-  test('permissionFor never answers with the compensation permission', () => {
-    // The module still has only read and write, so people.compensation.read is
-    // reachable only when a gate states it. An empty or read-only People gate can
-    // never widen into salary history by accident.
-    expect(permissionFor('people', 'read')).not.toBe(COMPENSATION_READ);
-    expect(permissionFor('people', 'write')).not.toBe(COMPENSATION_READ);
+  test('gives the compensation write to the four paying roles and to nobody else', () => {
+    // The write half is a separate name, so a role that may list salaries is not
+    // thereby allowed to change one. The same four roles hold both, for the same
+    // reason: they are the roles that administer pay.
+    for (const role of ['owner', 'admin', 'hr', 'finance'] as const) {
+      expect(hasPermission(role, COMPENSATION_WRITE)).toBe(true);
+      expect(permissionsForRole(role)).toContain(COMPENSATION_WRITE);
+    }
+    for (const role of ['manager', 'employee', 'auditor'] as const) {
+      expect(hasPermission(role, COMPENSATION_WRITE)).toBe(false);
+      expect(permissionsForRole(role)).not.toContain(COMPENSATION_WRITE);
+    }
+
+    // Finance is the grant that only makes sense on a separate axis: it may put a
+    // figure on a colleague's pay row and may not touch that colleague's name or
+    // placement. Reading the directory is the shared half; writing the directory
+    // is not.
+    expect(hasPermission('finance', COMPENSATION_WRITE)).toBe(true);
+    expect(hasPermission('finance', 'people.write')).toBe(false);
+
+    // HR holds both writes, because it maintains the person and the pay.
+    expect(hasPermission('hr', 'people.write')).toBe(true);
+    expect(hasPermission('hr', COMPENSATION_WRITE)).toBe(true);
+
+    // The write never implies the read, either: no role holds one compensation
+    // permission without the other, and the matrix would have to change for that
+    // to become possible.
+    for (const role of MEMBERSHIP_ROLES) {
+      const held = permissionsForRole(role);
+      expect(held.includes(COMPENSATION_WRITE)).toBe(held.includes(COMPENSATION_READ));
+    }
+  });
+
+  test('permissionFor never answers with either compensation permission', () => {
+    // The module still has only read and write, so neither compensation name is
+    // reachable except when a gate states it. An empty or read-only People gate
+    // can never widen into salary history, or into a salary write, by accident.
+    for (const operation of MODULE_OPERATIONS) {
+      expect(permissionFor('people', operation)).not.toBe(COMPENSATION_READ);
+      expect(permissionFor('people', operation)).not.toBe(COMPENSATION_WRITE);
+    }
   });
 
   test('hasPermission allows only a policy grant and fails closed', () => {

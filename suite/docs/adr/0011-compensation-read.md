@@ -166,9 +166,10 @@ Four constraints shape the design, and the first is the reason this slice is a r
     the placement routes, the three employment routes, the 26 `person` column privileges and the twelve
     runtime table-level grants are untouched; `tests/people-export.test.ts` passes unchanged and the
     test pins that the export bytes are byte-identical after compensation rows exist, so a salary read
-    cannot leak through the directory export by accident. The migration ledger ends at
-    `0013_compensation_read.sql` (13 files), the policy inventory is 275 (66 permissive, 209
-    restrictive) and the scope-policy set is nine names across three tables.
+    cannot leak through the directory export by accident. As this slice was written the migration
+    ledger ended at `0013_compensation_read.sql` (13 files), the policy inventory was 275 (66
+    permissive, 209 restrictive) and the scope-policy set was nine names across three tables; the
+    amendment at the end of this file records what T23 moved each of those figures to.
 
 ## Consequences
 
@@ -222,8 +223,9 @@ Four constraints shape the design, and the first is the reason this slice is a r
   employment. It is acceptable while no import path fills the table; the Switch milestone is the first
   thing that will put many salary rows on one person, and this read must be revisited before then.
 - **Nothing here has run in CI.** The GitHub account is annotated as locked for billing and no job has
-  executed a step; the local suite (29 files, 417 tests) and the two Chromium journeys are the only
-  evidence. M0 is not exited and this slice does not change that.
+  executed a step; the local suite (29 files, 417 tests as this slice was written, 30 files
+  and 462 tests since [ADR 0012](0012-compensation-write.md) added its suite) and the two
+  Chromium journeys are the only evidence. M0 is not exited and this slice does not change that.
 
 ## Not built
 
@@ -238,3 +240,34 @@ anything, no employee-facing or manager-facing read, and no cross-person list. `
 `tenant_id` are never named by a route or granted to `saas_runtime`. The only migration is the one
 restrictive read policy in `0013_compensation_read.sql`; no helper, no function, no table-level grant
 and no existing policy changed.
+
+## Amendment — T23 adds the compensation write path (M1 slice 8)
+
+This ADR's decision text above is left as accepted, and four of its sentences are no longer
+true of the build, so they are listed here rather than rewritten:
+
+- decision 1's "There is no `people.compensation.write`" and the five-entry `PERMISSIONS`
+  list: the list now has six entries and the fourth is that write, granted to the same four
+  roles as the read. The read is still not implied by `people.read` and the write is still
+  not implied by the read — see [ADR 0012](0012-compensation-write.md) decision 1.
+- decision 4's "the only compensation route": `GET /v1/people/:id/compensations` now has two
+  neighbours, `POST /v1/people/:id/compensations` and
+  `PATCH /v1/people/:id/compensations/:compensationId`, in the same member-transaction shape
+  and with the same uniform misses.
+- decision 6's grant half: `suite/db/migrations/0014_compensation_write.sql` and two
+  column-qualified write commands join the one policy and the seven `SELECT` privileges
+  recorded above, so `compensation` is at twenty column privileges over eight columns with
+  still no table-level privilege and still no `DELETE`. The catalogue figures this ADR
+  quotes — 13 files, 275 policies (66 and 209), nine `scope_*` names — are 14, 277 (66 and
+  211) and eleven.
+- the screen fine print this slice shipped ("compensation is read-only in this build, that no
+  route can add, change or remove a record"): the panel now branches on the write permission,
+  and that sentence is what a member who holds the read without the write is told — which is
+  no longer true of the build, only of that member. ADR 0012 decision 13 records both texts.
+
+The "Not built" list above loses one entry — the compensation write path — and keeps every
+other: still no delete, no structure or component table, no rate, allowance, bonus, bank,
+account, tax or payslip column, no read of `compensation.structure`, no payroll run, no
+jurisdiction, no annualisation or proration, no aggregate, no paging, no export column and no
+audit of a successful read. What the write slice added is a way to put a figure on a row and a
+way to change it, not a way to remove one or a rule for what either figure means.

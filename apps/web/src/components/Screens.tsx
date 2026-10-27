@@ -1,7 +1,10 @@
 import { Fragment, useEffect, useState, type FormEvent } from 'react';
 import type {
+  CompensationCreateInput,
+  CompensationItem,
   CompensationListResponse,
   CompensationPayFrequency,
+  CompensationUpdateInput,
   ContextResponse,
   EmploymentCreateInput,
   EmploymentItem,
@@ -17,6 +20,8 @@ import type {
   PeopleUpdateInput,
 } from '@saasmodels/contracts';
 import {
+  COMPENSATION_CTC_MINOR_MAX,
+  COMPENSATION_PAY_FREQUENCIES,
   EMPLOYMENT_NOTICE_DAYS_MAX,
   EMPLOYMENT_STATUSES,
   EMPLOYMENT_TYPES,
@@ -33,6 +38,7 @@ import {
   accessLabel,
   availableModuleNames,
   canReadCompensation,
+  canWriteCompensation,
   findModule,
   formatCompensationAmount,
   orderModules,
@@ -527,13 +533,300 @@ function compensationErrorCopy(code: string | null): string {
   return COMPENSATION_ERROR_COPY[code] ?? COMPENSATION_ERROR_FALLBACK;
 }
 
-// Read-only by construction: there is no form state, no submitting flag and
-// nothing to save, because no route writes compensation in this build.
+// Every failure these two writes can return has copy of its own, so the panel
+// never shows a raw server message and never shows a save it did not get. The
+// amount, the currency and the dates are named in the copy but never repeated by
+// it: an error message that echoes a salary would put the figure in the browser
+// history and the accessibility tree, where the stored row already is not.
+const COMPENSATION_WRITE_ERROR_COPY: Record<string, string> = {
+  PERSON_NOT_FOUND: 'That person is no longer in the directory you can see.',
+  // The same refusal the employment form explains: the directory shows the person
+  // to you, and maintaining what they cost belongs to a scope that reaches them.
+  SCOPE_DENIED:
+    'You can see this person, but your scope does not cover where they are placed, so their pay is not yours to change.',
+  COMPENSATION_NOT_FOUND:
+    'That salary record is no longer available to you.',
+  COMPENSATION_PERIOD_EXISTS:
+    'This person already has a record opening on that date. A change of pay is recorded on a new day, so use a start date no other record of theirs uses.',
+  INVALID_BODY:
+    'The details were not accepted. An effective-from date, a whole-number amount in minor units and a three-letter upper-case currency are required, an effective-to date cannot precede the effective-from date, and the pay frequency must be one of the four offered.',
+  CSRF_INVALID:
+    'This browser no longer matches your session. Sign out, sign in again and retry.',
+  NETWORK: 'The workspace could not be reached. Check your connection and try again.',
+};
+
+const COMPENSATION_WRITE_ERROR_FALLBACK =
+  'The salary record could not be saved. Try again.';
+
+function compensationWriteErrorCopy(code: string | null): string {
+  if (code === null) {
+    return COMPENSATION_WRITE_ERROR_FALLBACK;
+  }
+  return COMPENSATION_WRITE_ERROR_COPY[code] ?? COMPENSATION_WRITE_ERROR_FALLBACK;
+}
+
 type CompensationPanelState =
   | { phase: 'idle' }
   | { phase: 'loading' }
   | { phase: 'error'; message: string }
   | { phase: 'ready'; data: CompensationListResponse };
+
+// Every value is a string here because every field is an input, and a number
+// field that has been cleared reads back as ''. The converters below decide what
+// the server is told: a blank effective_to on an edit clears the period, and a
+// blank one on a create leaves the key out entirely.
+type CompensationFormValues = {
+  effectiveFrom: string;
+  effectiveTo: string;
+  ctcMinor: string;
+  currency: string;
+  payFrequency: CompensationPayFrequency;
+};
+
+const EMPTY_COMPENSATION_FORM: CompensationFormValues = {
+  effectiveFrom: '',
+  effectiveTo: '',
+  ctcMinor: '',
+  currency: '',
+  payFrequency: 'monthly',
+};
+
+// currency is typed, not chosen, so nothing here can restrict it to a code list:
+// the input caps the value at three characters and leaves the case alone, and the
+// server's upper-case-only rule is the one that refuses a lower-case code rather
+// than silently converting it. The field hint says so before the first submit.
+const COMPENSATION_CURRENCY_MAX_LENGTH = 3;
+
+function formValuesFromCompensation(
+  compensation: CompensationItem,
+): CompensationFormValues {
+  return {
+    effectiveFrom: compensation.effectiveFrom,
+    effectiveTo: compensation.effectiveTo ?? '',
+    ctcMinor: String(compensation.ctcMinor),
+    currency: compensation.currency,
+    payFrequency: compensation.payFrequency,
+  };
+}
+
+function compensationCreateInput(
+  values: CompensationFormValues,
+): CompensationCreateInput {
+  const input: CompensationCreateInput = {
+    effectiveFrom: values.effectiveFrom,
+    ctcMinor: Number(values.ctcMinor),
+    currency: values.currency.trim(),
+    payFrequency: values.payFrequency,
+  };
+  // A blank optional on create means "not recorded", so the key is left out and
+  // the audit lists only the fields someone actually filled in.
+  if (values.effectiveTo !== '') {
+    input.effectiveTo = values.effectiveTo;
+  }
+  return input;
+}
+
+// A whole statement of the row, the way the employment edit works: a blank
+// effective_to on an edit clears the end of the period rather than leaving the
+// stored date alone.
+function compensationUpdateInput(
+  values: CompensationFormValues,
+): CompensationUpdateInput {
+  return {
+    effectiveFrom: values.effectiveFrom,
+    effectiveTo: values.effectiveTo === '' ? null : values.effectiveTo,
+    ctcMinor: Number(values.ctcMinor),
+    currency: values.currency.trim(),
+    payFrequency: values.payFrequency,
+  };
+}
+
+function compensationFormMatches(
+  values: CompensationFormValues,
+  compensation: CompensationItem,
+): boolean {
+  return (
+    values.effectiveFrom === compensation.effectiveFrom &&
+    values.effectiveTo === (compensation.effectiveTo ?? '') &&
+    values.ctcMinor === String(compensation.ctcMinor) &&
+    values.currency.trim() === compensation.currency &&
+    values.payFrequency === compensation.payFrequency
+  );
+}
+
+type CompensationFormProps = {
+  mode: 'create' | 'update';
+  values: CompensationFormValues;
+  submitting: boolean;
+  // The parent decides this, because only the parent holds the stored row an
+  // unchanged edit is compared against.
+  unchanged: boolean;
+  error: string | null;
+  onField: (field: keyof CompensationFormValues, value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onCancel: () => void;
+};
+
+function CompensationWriteForm({
+  mode,
+  values,
+  submitting,
+  unchanged,
+  error,
+  onField,
+  onSubmit,
+  onCancel,
+}: CompensationFormProps) {
+  const titleId = `compensation-${mode}-title`;
+  const amountTooLarge =
+    values.ctcMinor !== '' && Number(values.ctcMinor) > COMPENSATION_CTC_MINOR_MAX;
+
+  return (
+    <form
+      className="people-form employment-form"
+      aria-labelledby={titleId}
+      onSubmit={onSubmit}
+    >
+      <h3 id={titleId} className="people-form-title">
+        {mode === 'create' ? 'Add compensation' : 'Edit this compensation'}
+      </h3>
+
+      <div className="people-form-grid">
+        <div className="field">
+          <label htmlFor="compensation-form-effectiveFrom">
+            Effective from
+            <span className="required-mark"> (required)</span>
+          </label>
+          <input
+            id="compensation-form-effectiveFrom"
+            name="effectiveFrom"
+            type="date"
+            value={values.effectiveFrom}
+            disabled={submitting}
+            onChange={(event) => onField('effectiveFrom', event.target.value)}
+          />
+        </div>
+
+        <div className="field">
+          <label htmlFor="compensation-form-effectiveTo">
+            Effective to (blank means open)
+          </label>
+          <input
+            id="compensation-form-effectiveTo"
+            name="effectiveTo"
+            type="date"
+            value={values.effectiveTo}
+            disabled={submitting}
+            onChange={(event) => onField('effectiveTo', event.target.value)}
+          />
+        </div>
+
+        <div className="field">
+          <label htmlFor="compensation-form-ctcMinor">
+            Amount in minor units
+            <span className="required-mark"> (required)</span>
+          </label>
+          <input
+            id="compensation-form-ctcMinor"
+            name="ctcMinor"
+            type="number"
+            min={0}
+            max={COMPENSATION_CTC_MINOR_MAX}
+            step={1}
+            value={values.ctcMinor}
+            disabled={submitting}
+            onChange={(event) => onField('ctcMinor', event.target.value)}
+          />
+          <p className="field-hint">
+            The stored count of minor units, with no exponent table behind it. One
+            hundred is shown as 1.00 for two-decimal currencies. Nothing here
+            converts the figure to a month or a year.
+          </p>
+        </div>
+
+        <div className="field">
+          <label htmlFor="compensation-form-currency">
+            Currency
+            <span className="required-mark"> (required)</span>
+          </label>
+          <input
+            id="compensation-form-currency"
+            name="currency"
+            type="text"
+            value={values.currency}
+            maxLength={COMPENSATION_CURRENCY_MAX_LENGTH}
+            placeholder="INR"
+            autoComplete="off"
+            spellCheck={false}
+            disabled={submitting}
+            onChange={(event) => onField('currency', event.target.value)}
+          />
+          <p className="field-hint">
+            Three upper-case letters, exactly as stored. A lower-case code is
+            refused rather than corrected.
+          </p>
+        </div>
+
+        <div className="field">
+          <label htmlFor="compensation-form-payFrequency">
+            Pay frequency
+            <span className="required-mark"> (required)</span>
+          </label>
+          <select
+            id="compensation-form-payFrequency"
+            name="payFrequency"
+            value={values.payFrequency}
+            disabled={submitting}
+            onChange={(event) => onField('payFrequency', event.target.value)}
+          >
+            {COMPENSATION_PAY_FREQUENCIES.map((frequency) => (
+              <option value={frequency} key={frequency}>
+                {COMPENSATION_PAY_FREQUENCY_LABELS[frequency]}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {error ? (
+        <p className="form-alert" role="alert">
+          {error}
+        </p>
+      ) : null}
+
+      <div className="people-form-actions">
+        <button
+          className="button button--primary"
+          type="submit"
+          disabled={
+            submitting ||
+            values.effectiveFrom === '' ||
+            values.ctcMinor === '' ||
+            values.currency.trim() === '' ||
+            amountTooLarge ||
+            (mode === 'update' && unchanged)
+          }
+        >
+          {mode === 'create' ? 'Save compensation' : 'Save changes'}
+        </button>
+        <button
+          className="button button--quiet"
+          type="button"
+          onClick={onCancel}
+          disabled={submitting}
+        >
+          Cancel
+        </button>
+      </div>
+
+      <p className="fine-print people-form-note">
+        {mode === 'create'
+          ? 'A new record opens on its own date; the amount of an existing record is not restated here. Nothing is annualised or prorated, and payroll, payslips and statutory deductions are not built.'
+          : 'This amends the stored row in place. A record that has already been superseded is normally corrected by adding a new one on a later date rather than by changing this one. Nothing is annualised or prorated, and payroll is not built.'}
+      </p>
+    </form>
+  );
+}
 
 type EmploymentFormProps = {
   mode: 'create' | 'update';
@@ -706,8 +999,8 @@ function EmploymentWriteForm({
 
       <p className="fine-print people-form-note">
         {mode === 'create'
-          ? 'Employment is separate from directory placement. The legal entity is taken from where this person is placed now, and it never changes on this record. Compensation and payroll are not built here.'
-          : 'This record keeps the legal entity it was written against, even if the person has since been placed elsewhere. Compensation and payroll are not built here.'}
+          ? 'Employment is separate from directory placement. The legal entity is taken from where this person is placed now, and it never changes on this record. Payroll is not built here.'
+          : 'This record keeps the legal entity it was written against, even if the person has since been placed elsewhere. Payroll is not built here.'}
       </p>
     </form>
   );
@@ -826,6 +1119,13 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
   const [compensationState, setCompensationState] =
     useState<CompensationPanelState>({ phase: 'idle' });
   const [compensationAttempt, setCompensationAttempt] = useState(0);
+  const [compensationForm, setCompensationForm] = useState<
+    { mode: 'create' } | { mode: 'update'; compensation: CompensationItem } | null
+  >(null);
+  const [compensationValues, setCompensationValues] =
+    useState<CompensationFormValues>(EMPTY_COMPENSATION_FORM);
+  const [compensationSubmitting, setCompensationSubmitting] = useState(false);
+  const [compensationError, setCompensationError] = useState<string | null>(null);
 
   useEffect(() => {
     // A response is dropped once the search or page has moved on, so a slow
@@ -1061,24 +1361,84 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
     setEmploymentAttempt((current) => current + 1);
   }
 
+  function closeCompensationForm() {
+    setCompensationForm(null);
+    setCompensationValues(EMPTY_COMPENSATION_FORM);
+    setCompensationError(null);
+  }
+
   function closeCompensation() {
+    closeCompensationForm();
     setCompensating(null);
     setCompensationState({ phase: 'idle' });
   }
 
-  // Opening this one needs no write of any kind, and it promises none: the panel
-  // it opens is the stored rows and nothing else, because no route in this build
-  // writes compensation.
+  // Opening this one needs no write of any kind, and it promises none on its own:
+  // the panel shows the stored rows, and the add and edit controls inside it
+  // appear only for a member whose role holds people.compensation.write.
   function openCompensation(person: PeopleListItem) {
     closeForm();
     closePlacement();
     closeEmployment();
     setSavedMessage(null);
+    closeCompensationForm();
     setCompensationState({ phase: 'idle' });
     setCompensating(person);
   }
 
   function retryCompensations() {
+    closeCompensationForm();
+    setCompensationAttempt((current) => current + 1);
+  }
+
+  function openCompensationCreate() {
+    setSavedMessage(null);
+    setCompensationError(null);
+    setCompensationValues(EMPTY_COMPENSATION_FORM);
+    setCompensationForm({ mode: 'create' });
+  }
+
+  function openCompensationEdit(compensation: CompensationItem) {
+    setSavedMessage(null);
+    setCompensationError(null);
+    setCompensationValues(formValuesFromCompensation(compensation));
+    setCompensationForm({ mode: 'update', compensation });
+  }
+
+  async function submitCompensationForm(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (compensationForm === null || compensationSubmitting || compensating === null) {
+      return;
+    }
+    const mode = compensationForm.mode;
+    setCompensationSubmitting(true);
+    setCompensationError(null);
+    const result =
+      mode === 'create'
+        ? await api.createCompensation(
+            compensating.id,
+            compensationCreateInput(compensationValues),
+          )
+        : await api.updateCompensation(
+            compensating.id,
+            compensationForm.compensation.id,
+            compensationUpdateInput(compensationValues),
+          );
+    setCompensationSubmitting(false);
+
+    if (!result.ok) {
+      if (result.status === 401) {
+        // The global listener is taking the app back to sign-in.
+        closeCompensation();
+        return;
+      }
+      setCompensationError(compensationWriteErrorCopy(result.code));
+      return;
+    }
+
+    closeCompensationForm();
+    setSavedMessage(mode === 'create' ? 'Compensation added.' : 'Compensation updated.');
+    // Reload the same person's history the panel is already showing.
     setCompensationAttempt((current) => current + 1);
   }
 
@@ -1212,6 +1572,13 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
     employmentForm !== null &&
     employmentForm.mode === 'update' &&
     employmentFormMatches(employmentValues, employmentForm.employment);
+  // The same rule for a salary edit: every key is stated, so an unchanged form
+  // would be refused no work by the server and would need an audit row.
+  const canWriteSalary = canWriteCompensation(context);
+  const compensationIsUnchanged =
+    compensationForm !== null &&
+    compensationForm.mode === 'update' &&
+    compensationFormMatches(compensationValues, compensationForm.compensation);
 
   return (
     <article className="page page--people">
@@ -1384,8 +1751,8 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
 
                 <p className="fine-print">
                   Placement is a directory attribute, not an employment record.
-                  Use Employment on this row for dates and status. Compensation
-                  is not editable anywhere yet.
+                  Use Employment on this row for dates and status, and Compensation
+                  for the stored pay records.
                 </p>
               </form>
             ) : null}
@@ -1528,8 +1895,8 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
                 <p className="fine-print employment-note">
                   Employment is separate from directory placement. Each record
                   keeps the legal entity this person was placed on when the record
-                  was made, and a later placement does not change it. Compensation
-                  and payroll are not built here.
+                  was made, and a later placement does not change it. Payroll is
+                  not built here.
                 </p>
               </div>
             ) : null}
@@ -1549,6 +1916,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
                 className="button button--quiet button--small"
                 type="button"
                 onClick={closeCompensation}
+                disabled={compensationSubmitting}
               >
                 Close
               </button>
@@ -1594,6 +1962,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
                           <th scope="col">Effective to</th>
                           <th scope="col">Amount</th>
                           <th scope="col">Pay frequency</th>
+                          {canWriteSalary ? <th scope="col">Actions</th> : null}
                         </tr>
                       </thead>
                       <tbody>
@@ -1612,6 +1981,21 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
                                 compensation.payFrequency
                               ]}
                             </td>
+                            {canWriteSalary ? (
+                              <td className="directory-actions">
+                                <button
+                                  className="button button--quiet button--small"
+                                  type="button"
+                                  aria-label={`Edit compensation from ${compensation.effectiveFrom}`}
+                                  onClick={() => openCompensationEdit(compensation)}
+                                  disabled={
+                                    compensationForm !== null || compensationSubmitting
+                                  }
+                                >
+                                  Edit
+                                </button>
+                              </td>
+                            ) : null}
                           </tr>
                         ))}
                       </tbody>
@@ -1619,14 +2003,65 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
                   </div>
                 )}
 
+                {compensationForm ? (
+                  <CompensationWriteForm
+                    mode={compensationForm.mode}
+                    values={compensationValues}
+                    submitting={compensationSubmitting}
+                    unchanged={compensationIsUnchanged}
+                    error={compensationError}
+                    onField={(field, value) =>
+                      setCompensationValues((current) => ({
+                        ...current,
+                        [field]: value,
+                      }))
+                    }
+                    onSubmit={(event) => void submitCompensationForm(event)}
+                    onCancel={closeCompensationForm}
+                  />
+                ) : canWriteSalary ? (
+                  <div className="people-form-actions">
+                    <button
+                      className="button button--primary button--small"
+                      type="button"
+                      onClick={openCompensationCreate}
+                      disabled={compensationSubmitting}
+                    >
+                      Add compensation
+                    </button>
+                  </div>
+                ) : null}
+
+                {/* The two audiences have to be told different truths, so the note
+                    branches on the same permission the controls branch on: a member
+                    who holds the read but not the write is still looking at a panel
+                    with nothing in it that changes a row, and saying otherwise would
+                    promise an action this screen will not offer. */}
                 <p className="fine-print compensation-note">
-                  Compensation is read-only in this build. There is no way to add,
-                  change or remove a salary record from this screen or anywhere
-                  else in the product yet, and none of these figures can be
-                  edited. Payroll, payslips and statutory deductions are not
-                  built, so each row is a stored amount in its own currency with
-                  the pay frequency stored beside it - not a monthly or annual
-                  salary worked out from it.
+                  {canWriteSalary ? (
+                    <>
+                      A record can be added here for a person in this member&apos;s
+                      scope, and one of that person&apos;s records amended. No record
+                      can be deleted: a correction is made by adding a row that opens
+                      later, and the row it corrects stays. Payroll, payslips and
+                      statutory deductions are not built, so each row is a stored
+                      amount in its own currency with the pay frequency stored beside
+                      it - not a monthly or annual salary worked out from it, and
+                      nothing here annualises or prorates it.
+                    </>
+                  ) : (
+                    <>
+                      Compensation is read-only in this build for you. A member whose
+                      role also holds the pay write can add a record and amend one
+                      inside their own scope; you can read these figures and change
+                      none of them, and no record can be deleted by anyone: a
+                      correction is made by adding a row that opens later. Payroll,
+                      payslips and statutory deductions are not built, so each row is
+                      a stored amount in its own currency with the pay frequency
+                      stored beside it - not a monthly or annual salary worked out
+                      from it.
+                    </>
+                  )}
                 </p>
               </div>
             ) : null}

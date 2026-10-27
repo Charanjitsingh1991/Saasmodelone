@@ -114,6 +114,7 @@ export default tseslint.config(
       '**/dist/**',
       '**/coverage/**',
       '**/.tmp/**',
+      'var/**',
       'playwright-report/**',
       'test-results/**',
     ],

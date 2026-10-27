@@ -9,6 +9,7 @@ import {
   availableModuleNames,
   canReadCompensation,
   canReadPeople,
+  canWriteCompensation,
   findModule,
   formatCompensationAmount,
   navigationModules,
@@ -31,6 +32,7 @@ const OWNER_PERMISSIONS: Permission[] = [
   'people.read',
   'people.write',
   'people.compensation.read',
+  'people.compensation.write',
   'work.read',
   'work.write',
 ];
@@ -117,6 +119,41 @@ describe('module presentation', () => {
       ),
     ).toBe(false);
     expect(canReadCompensation(context([module('people', 10)], []))).toBe(false);
+  });
+
+  test('offers the salary write only to a context holding the write permission', () => {
+    expect(canWriteCompensation(context([module('people', 10)]))).toBe(true);
+
+    // The read is not the write: a member who may list pay sees the panel closed.
+    expect(
+      canWriteCompensation(
+        context([module('people', 10)], ['people.read', 'people.compensation.read']),
+      ),
+    ).toBe(false);
+
+    // And the directory write is not the pay write either. This is the finance
+    // shape seen from the other side: a role can hold the pay write without ever
+    // being allowed to rename a colleague.
+    expect(
+      canWriteCompensation(context([module('people', 10)], ['people.write'])),
+    ).toBe(false);
+    expect(
+      canWriteCompensation(
+        context([module('people', 10, false, false)], [
+          'people.compensation.read',
+          'people.compensation.write',
+        ]),
+      ),
+    ).toBe(true);
+
+    expect(canWriteCompensation(context([module('people', 10)], []))).toBe(false);
+
+    // Hiding the control is presentation, not authorization, and the two helpers
+    // stay independent questions: on a read-only pay context the panel opens and
+    // no write control is offered.
+    const readOnlyPay = context([module('people', 10)], ['people.compensation.read']);
+    expect(canReadCompensation(readOnlyPay)).toBe(true);
+    expect(canWriteCompensation(readOnlyPay)).toBe(false);
   });
 
   test('renders a stored amount as its own minor units and currency, unchanged', () => {

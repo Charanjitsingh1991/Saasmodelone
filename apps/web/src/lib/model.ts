@@ -50,6 +50,15 @@ export function canReadCompensation(context: ContextResponse): boolean {
   return context.permissions.includes('people.compensation.read');
 }
 
+// The write half of the same axis, and deliberately not a test of the
+// directory's write: finance administers pay without being allowed to rename a
+// colleague, so this asks only for people.compensation.write. Hiding the control
+// is presentation, never authorization - the route checks the permission, the
+// module entitlement and the member's scope over the person again.
+export function canWriteCompensation(context: ContextResponse): boolean {
+  return context.permissions.includes('people.compensation.write');
+}
+
 // Money is stored as a bigint count of minor units, and the compensation table
 // records no decimal exponent, so this renders two fractional digits for every
 // currency. That is a display convention, not a conversion: the figure is the

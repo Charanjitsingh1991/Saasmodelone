@@ -1,6 +1,9 @@
 import type {
   ContextResponse,
+  CompensationCreateInput,
+  CompensationItem,
   CompensationListResponse,
+  CompensationUpdateInput,
   EmploymentCreateInput,
   EmploymentItem,
   EmploymentListResponse,
@@ -180,14 +183,36 @@ export const api = {
       },
     ),
 
-  // One person's compensation history. A GET, so no CSRF header. This is the
-  // only compensation call the client has: no route writes salary yet, so the
-  // screen can offer no add, edit or save. The server gates it on
-  // people.compensation.read - a stricter test than the directory's people.read -
-  // and narrows every row by this member's own scope.
+  // One person's compensation history. A GET, so no CSRF header. The server gates
+  // it on people.compensation.read - a stricter test than the directory's
+  // people.read - and narrows every row by this member's own scope.
   compensations: (id: string) =>
     request<CompensationListResponse>(
       `/v1/people/${encodeURIComponent(id)}/compensations`,
+    ),
+
+  // A salary row. The server gates both writes on people.compensation.write, a
+  // permission of its own on either side of the read above, and on the member's
+  // scope over the person in the path. The person is never in the body.
+  createCompensation: (id: string, input: CompensationCreateInput) =>
+    request<CompensationItem>(`/v1/people/${encodeURIComponent(id)}/compensations`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify(input),
+    }),
+
+  updateCompensation: (
+    id: string,
+    compensationId: string,
+    input: CompensationUpdateInput,
+  ) =>
+    request<CompensationItem>(
+      `/v1/people/${encodeURIComponent(id)}/compensations/${encodeURIComponent(compensationId)}`,
+      {
+        method: 'PATCH',
+        headers: writeHeaders(),
+        body: JSON.stringify(input),
+      },
     ),
 
   login: (input: LoginInput) =>
