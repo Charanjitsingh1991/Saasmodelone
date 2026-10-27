@@ -1059,6 +1059,57 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
   line-height: 1.6;
 }
 
+/* Employment panel. It sits on .placement-panel's card so the three People
+   panels share one shape, and on .directory-table for the history itself. */
+
+.employment-panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.employment-body {
+  margin-top: 6px;
+}
+
+/* Seven columns of dates and labels need more room than the directory's six,
+   and the .directory-scroll wrapper is what keeps the surplus from widening
+   the page. */
+.employment-table {
+  min-width: 820px;
+}
+
+.employment-status {
+  min-height: 28px;
+  background: var(--paper-deep);
+  color: var(--ink-soft);
+}
+
+.employment-status--active {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.employment-status--cancelled {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* The write form is a card on its own in the directory; inside the panel it
+   drops the second frame and keeps only the spacing. */
+.employment-panel .employment-form {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.employment-note {
+  max-width: 68ch;
+  margin-top: 18px;
+}
+
 .panel-state {
   max-width: 660px;
   padding-top: clamp(30px, 7vw, 80px);

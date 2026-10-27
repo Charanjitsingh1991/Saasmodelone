@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { Client } from 'pg';
 import { expect, test, type Page } from '@playwright/test';
 import { createServer } from '@saasmodels/api';
@@ -29,6 +30,36 @@ let auth: AuthPool | undefined;
 let server: ReturnType<typeof createServer> | undefined;
 let peopleAccount: Account | undefined;
 let workAccount: Account | undefined;
+let readerAccount: Account | undefined;
+
+// A member of the People workspace whose role may read the directory and no
+// part of it. Manager carries people.read without people.write, so the screen
+// has to show the history and hide every control that would change it. The
+// membership is written owner-side because role administration has no route in
+// this milestone.
+async function createReaderMember(
+  owner: Client,
+  tenantId: string,
+  passwordHash: string,
+): Promise<string> {
+  const email = `e2e_reader_${randomBytes(4).toString('hex')}@example.test`;
+  const user = await owner.query<{ id: string }>(
+    `insert into app_user (email, display_name, status, password_hash)
+     values ($1, 'E2E reader', 'active', $2)
+     returning id`,
+    [email, passwordHash],
+  );
+  const userId = user.rows[0]?.id;
+  if (!userId) {
+    throw new Error('Could not create the read-only e2e account');
+  }
+  await owner.query(
+    `insert into membership (tenant_id, user_id, role, status)
+     values ($1, $2, 'manager', 'active')`,
+    [tenantId, userId],
+  );
+  return email;
+}
 
 function requireAccount(account: Account | undefined, name: string): Account {
   if (!account) {
@@ -98,8 +129,15 @@ test.beforeAll(async () => {
       );
     }
 
-    peopleAccount = await readAccount(owner, fixtures.a.userId, fixtures.a.tenantId);
+    const ownerAccount = await readAccount(owner, fixtures.a.userId, fixtures.a.tenantId);
+    peopleAccount = ownerAccount;
     workAccount = await readAccount(owner, fixtures.b.userId, fixtures.b.tenantId);
+    readerAccount = {
+      // The slug was rewritten to the login contract's character set above, so
+      // the reader signs in to the same workspace as the owner.
+      slug: ownerAccount.slug,
+      email: await createReaderMember(owner, fixtures.a.tenantId, passwordHash),
+    };
   } finally {
     await owner.end();
   }
@@ -320,6 +358,113 @@ test('signs in, searches, creates and edits the directory, gates People and pers
   ).toBeVisible();
   await expect(nadiaPlacement).toHaveText('Legal a · E2E placement unit');
 
+  // Employment: the person's own history, opened from its row action. It is
+  // empty until a record is added, and the legal entity on the record is the
+  // placement's entity, taken at the moment the record was made.
+  await directory.getByRole('button', { name: 'Employment Nadia Kaur' }).click();
+  const employmentPanel = page.locator('.employment-panel');
+  await expect(employmentPanel).toHaveCount(1);
+  await expect(
+    employmentPanel.getByRole('heading', { name: 'Employment for Nadia Kaur' }),
+  ).toBeVisible();
+  await expect(
+    employmentPanel.getByText('No employment is recorded for this person yet.'),
+  ).toBeVisible();
+
+  await employmentPanel.getByRole('button', { name: 'Add employment' }).click();
+  const employmentForm = page.getByRole('form', { name: 'Add employment' });
+  await expect(employmentForm).toBeVisible();
+  // Create offers five fields and no status: the server chooses active.
+  await expect(employmentForm.locator('.field')).toHaveCount(5);
+  await expect(employmentForm.locator('#employment-form-status')).toHaveCount(0);
+  await expect(employmentForm.getByRole('button', { name: 'Save employment' })).toBeDisabled();
+  await expect(
+    employmentForm.locator('.people-form-note'),
+  ).toContainText('taken from where this person is placed now');
+
+  // The panel has to fold on a phone like any other form on this screen.
+  for (const width of [390, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await noHorizontalOverflow(page);
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+
+  await page.locator('#employment-form-startDate').fill('2024-06-01');
+  await page.locator('#employment-form-noticeDays').fill('30');
+  await employmentForm.getByRole('button', { name: 'Save employment' }).click();
+  await expect(saved).toHaveText('Employment added.');
+
+  const history = employmentPanel.getByRole('table', {
+    name: 'Employment history for Nadia Kaur',
+  });
+  await expect(history.getByRole('rowheader', { name: 'Legal a', exact: true })).toBeVisible();
+  await expect(
+    history.getByRole('cell', { name: 'Full time', exact: true }),
+  ).toBeVisible();
+  await expect(
+    history.getByRole('cell', { name: '2024-06-01 – open', exact: true }),
+  ).toBeVisible();
+  await expect(history.getByRole('cell', { name: '30', exact: true })).toBeVisible();
+  await expect(history.locator('.employment-status')).toHaveText('Active');
+  await expect(history.locator('.employment-status')).toHaveClass(
+    /employment-status--active/,
+  );
+
+  // Ending the record is a forward move and needs an end date. Without one the
+  // server refuses and the panel says so instead of pretending the save worked.
+  await history.getByRole('button', { name: 'Edit employment from 2024-06-01' }).click();
+  const editEmployment = page.getByRole('form', { name: 'Edit this employment' });
+  await expect(editEmployment).toBeVisible();
+  // Update offers six fields, because status is the sixth, and it opens on the
+  // stored values.
+  await expect(editEmployment.locator('.field')).toHaveCount(6);
+  await expect(page.locator('#employment-form-startDate')).toHaveValue('2024-06-01');
+  await expect(page.locator('#employment-form-noticeDays')).toHaveValue('30');
+  await expect(page.locator('#employment-form-status')).toBeEnabled();
+  // An active record is offered every status, because every move from active is
+  // allowed.
+  const activeStatusLabels = await page
+    .locator('#employment-form-status')
+    .evaluate((element) =>
+      Array.from((element as HTMLSelectElement).options).map((option) => option.text),
+    );
+  expect(activeStatusLabels).toEqual(['Active', 'Ended', 'Cancelled']);
+  await expect(editEmployment.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+  await page.locator('#employment-form-status').selectOption('ended');
+  await editEmployment.getByRole('button', { name: 'Save changes' }).click();
+  await expect(editEmployment.locator('.form-alert')).toHaveText(
+    'The details were not accepted. A type and a start date are required, an end date and a probation end date cannot precede the start, and notice days must be a whole number from 0 to 3650.',
+  );
+  await page.locator('#employment-form-endDate').fill('2025-01-31');
+  await editEmployment.getByRole('button', { name: 'Save changes' }).click();
+  await expect(saved).toHaveText('Employment updated.');
+
+  await expect(
+    history.getByRole('cell', { name: '2024-06-01 – 2025-01-31', exact: true }),
+  ).toBeVisible();
+  await expect(history.locator('.employment-status')).toHaveText('Ended');
+  await expect(history.locator('.employment-status')).toHaveClass(
+    /employment-status--ended/,
+  );
+
+  // Reopening the ended record offers only the status it is stored at: the
+  // screen never shows a transition the route would refuse.
+  await history.getByRole('button', { name: 'Edit employment from 2024-06-01' }).click();
+  const endedStatusLabels = await page
+    .locator('#employment-form-status')
+    .evaluate((element) =>
+      Array.from((element as HTMLSelectElement).options).map((option) => option.text),
+    );
+  expect(endedStatusLabels).toEqual(['Ended']);
+  await expect(
+    editEmployment.locator('.field-hint'),
+  ).toContainText('This record is already ended, so it stays that way.');
+  await editEmployment.getByRole('button', { name: 'Cancel' }).click();
+  await expect(editEmployment).toHaveCount(0);
+
+  await employmentPanel.getByRole('button', { name: 'Close' }).click();
+  await expect(employmentPanel).toHaveCount(0);
+
   await directory.getByRole('button', { name: 'Place Nadia Kaur' }).click();
   await expect(placementSelect).toBeEnabled();
   // The panel opens on the stored placement, so there is nothing to save until
@@ -335,6 +480,17 @@ test('signs in, searches, creates and edits the directory, gates People and pers
   await page.getByRole('button', { name: 'Save placement' }).click();
   await expect(saved).toHaveText('Placement updated.');
   await expect(nadiaPlacement).toHaveText('—');
+
+  // The employment record keeps the entity it was written against. Un-placing
+  // the person changes the directory cell and nothing on the history row.
+  await directory.getByRole('button', { name: 'Employment Nadia Kaur' }).click();
+  await expect(nadiaPlacement).toHaveText('—');
+  await expect(
+    history.getByRole('rowheader', { name: 'Legal a', exact: true }),
+  ).toBeVisible();
+  await expect(history.getByRole('cell', { name: '2024-06-01 – 2025-01-31' })).toBeVisible();
+  await employmentPanel.getByRole('button', { name: 'Close' }).click();
+  await expect(employmentPanel).toHaveCount(0);
 
   const nav = page.getByRole('navigation', { name: 'Modules' });
   await expect(nav.getByRole('link', { name: /People/ })).toHaveAttribute(
@@ -433,4 +589,62 @@ test('signs in, searches, creates and edits the directory, gates People and pers
   await expect(
     page.getByRole('heading', { name: 'People', exact: true }),
   ).toHaveCount(0);
+});
+
+test('a member whose role reads People sees the employment history with no way to change it', async ({
+  page,
+}) => {
+  const reader = requireAccount(readerAccount, 'Read-only');
+
+  await page.goto('/login');
+  await page.locator('#workspace').fill(reader.slug);
+  await page.locator('#email').fill(reader.email);
+  await page.locator('#password').fill(syntheticPassword);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page).toHaveURL(/\/app\/people$/);
+
+  // The access label comes from the server's permissions for this membership,
+  // not from what the screen would like to offer.
+  await expect(page.locator('.page-head .badge')).toHaveText('Read only');
+  const directory = page.getByRole('table', { name: 'People directory' });
+  await expect(
+    directory.getByRole('rowheader', { name: 'Nadia Kaur', exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Add person' })).toHaveCount(0);
+  await expect(
+    directory.getByRole('button', { name: 'Edit Nadia Kaur' }),
+  ).toHaveCount(0);
+  await expect(
+    directory.getByRole('button', { name: 'Place Nadia Kaur' }),
+  ).toHaveCount(0);
+
+  // Reading a history is a read, so the row action is here for a reader.
+  await directory.getByRole('button', { name: 'Employment Nadia Kaur' }).click();
+  const employmentPanel = page.locator('.employment-panel');
+  await expect(
+    employmentPanel.getByRole('heading', { name: 'Employment for Nadia Kaur' }),
+  ).toBeVisible();
+  const history = employmentPanel.getByRole('table', {
+    name: 'Employment history for Nadia Kaur',
+  });
+  await expect(history.getByRole('rowheader', { name: 'Legal a', exact: true })).toBeVisible();
+  await expect(
+    history.getByRole('cell', { name: '2024-06-01 – 2025-01-31', exact: true }),
+  ).toBeVisible();
+  await expect(history.locator('.employment-status')).toHaveText('Ended');
+
+  // Nothing in this panel writes: no Actions column, no edit control and no add
+  // button, because the route would answer ROLE_DENIED for every one of them.
+  await expect(
+    history.getByRole('columnheader', { name: 'Actions' }),
+  ).toHaveCount(0);
+  await expect(history.getByRole('button')).toHaveCount(0);
+  await expect(
+    employmentPanel.getByRole('button', { name: 'Add employment' }),
+  ).toHaveCount(0);
+
+  for (const width of [390, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await noHorizontalOverflow(page);
+  }
 });

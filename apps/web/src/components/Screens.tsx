@@ -1,6 +1,12 @@
 import { Fragment, useEffect, useState, type FormEvent } from 'react';
 import type {
   ContextResponse,
+  EmploymentCreateInput,
+  EmploymentItem,
+  EmploymentListResponse,
+  EmploymentStatus,
+  EmploymentType,
+  EmploymentUpdateInput,
   PeopleCreateInput,
   PeopleListItem,
   PeopleListResponse,
@@ -9,6 +15,9 @@ import type {
   PeopleUpdateInput,
 } from '@saasmodels/contracts';
 import {
+  EMPLOYMENT_NOTICE_DAYS_MAX,
+  EMPLOYMENT_STATUSES,
+  EMPLOYMENT_TYPES,
   PEOPLE_LIST_DEFAULT_PAGE_SIZE,
   PEOPLE_SEARCH_MAX_LENGTH,
   PERSON_DISPLAY_NAME_MAX_LENGTH,
@@ -325,6 +334,332 @@ function peopleUpdateInput(values: PeopleFormValues): PeopleUpdateInput {
   };
 }
 
+type EmploymentFormValues = {
+  employmentType: EmploymentType;
+  startDate: string;
+  endDate: string;
+  probationEndDate: string;
+  noticeDays: string;
+  status: EmploymentStatus;
+};
+
+const EMPTY_EMPLOYMENT_FORM: EmploymentFormValues = {
+  employmentType: 'full_time',
+  startDate: '',
+  endDate: '',
+  probationEndDate: '',
+  noticeDays: '',
+  status: 'active',
+};
+
+// The two enums are the only words on this panel a member cannot type, so they
+// are labelled from the contract values rather than stored as free text.
+const EMPLOYMENT_TYPE_LABELS: Record<EmploymentType, string> = {
+  full_time: 'Full time',
+  part_time: 'Part time',
+  contract: 'Contract',
+  intern: 'Intern',
+  consultant: 'Consultant',
+};
+
+const EMPLOYMENT_STATUS_LABELS: Record<EmploymentStatus, string> = {
+  active: 'Active',
+  ended: 'Ended',
+  cancelled: 'Cancelled',
+};
+
+// The offer follows the rule the route enforces: an active record can be closed
+// or cancelled, and a record that has left active stays where it is. A member
+// is never shown a transition the server would refuse.
+function offerableEmploymentStatuses(
+  current: EmploymentStatus,
+): EmploymentStatus[] {
+  return current === 'active' ? [...EMPLOYMENT_STATUSES] : [current];
+}
+
+function formValuesFromEmployment(employment: EmploymentItem): EmploymentFormValues {
+  return {
+    employmentType: employment.employmentType,
+    startDate: employment.startDate,
+    endDate: employment.endDate ?? '',
+    probationEndDate: employment.probationEndDate ?? '',
+    noticeDays: employment.noticeDays === null ? '' : String(employment.noticeDays),
+    status: employment.status,
+  };
+}
+
+// A blank optional on create means "not recorded", so the key is left out and the
+// audit lists only the fields someone actually filled in.
+function employmentCreateInput(values: EmploymentFormValues): EmploymentCreateInput {
+  const input: EmploymentCreateInput = {
+    employmentType: values.employmentType,
+    startDate: values.startDate,
+  };
+  if (values.endDate !== '') {
+    input.endDate = values.endDate;
+  }
+  if (values.probationEndDate !== '') {
+    input.probationEndDate = values.probationEndDate;
+  }
+  if (values.noticeDays !== '') {
+    input.noticeDays = Number(values.noticeDays);
+  }
+  return input;
+}
+
+// A whole statement of the row, so a blank optional field clears it the way the
+// identity form does. Status is always sent because the edit form always shows
+// it; on an unchanged row that is the same value, which the route reads as no
+// transition.
+function employmentUpdateInput(values: EmploymentFormValues): EmploymentUpdateInput {
+  return {
+    employmentType: values.employmentType,
+    startDate: values.startDate,
+    endDate: values.endDate === '' ? null : values.endDate,
+    probationEndDate: values.probationEndDate === '' ? null : values.probationEndDate,
+    noticeDays: values.noticeDays === '' ? null : Number(values.noticeDays),
+    status: values.status,
+  };
+}
+
+function employmentFormMatches(
+  values: EmploymentFormValues,
+  employment: EmploymentItem,
+): boolean {
+  return (
+    values.employmentType === employment.employmentType &&
+    values.startDate === employment.startDate &&
+    values.endDate === (employment.endDate ?? '') &&
+    values.probationEndDate === (employment.probationEndDate ?? '') &&
+    values.noticeDays ===
+      (employment.noticeDays === null ? '' : String(employment.noticeDays)) &&
+    values.status === employment.status
+  );
+}
+
+function employmentPeriod(employment: EmploymentItem): string {
+  return `${employment.startDate} – ${employment.endDate ?? 'open'}`;
+}
+
+// Every failure these routes can return has honest copy here, so the screen
+// never shows a raw server message and never shows a success it did not get.
+const EMPLOYMENT_WRITE_ERROR_COPY: Record<string, string> = {
+  EMPLOYMENT_ENTITY_REQUIRED:
+    'Place this person on a current legal entity first. Employment always records the entity the person sits on.',
+  EMPLOYMENT_STATUS_TRANSITION_INVALID:
+    'Employment status only moves forward: an active record can be ended or cancelled, and one that has ended or been cancelled stays that way.',
+  PERSON_NOT_FOUND: 'That person is no longer in the directory you can see.',
+  // The server can answer this for a colleague whose own record you are: the
+  // directory shows them to you, but maintaining their employment belongs to a
+  // role whose scope reaches that placement.
+  SCOPE_DENIED:
+    'You can see this person, but your scope does not cover where they are placed, so their employment is not yours to change.',
+  EMPLOYMENT_NOT_FOUND:
+    'That employment record is no longer available to you.',
+  INVALID_BODY:
+    'The details were not accepted. A type and a start date are required, an end date and a probation end date cannot precede the start, and notice days must be a whole number from 0 to 3650.',
+  CSRF_INVALID:
+    'This browser no longer matches your session. Sign out, sign in again and retry.',
+  NETWORK: 'The workspace could not be reached. Check your connection and try again.',
+};
+
+const EMPLOYMENT_WRITE_ERROR_FALLBACK =
+  'The employment record could not be saved. Try again.';
+
+function employmentWriteErrorCopy(code: string | null): string {
+  if (code === null) {
+    return EMPLOYMENT_WRITE_ERROR_FALLBACK;
+  }
+  return EMPLOYMENT_WRITE_ERROR_COPY[code] ?? EMPLOYMENT_WRITE_ERROR_FALLBACK;
+}
+
+const EMPLOYMENT_LIST_ERROR =
+  'The employment history could not be loaded. Try again.';
+
+type EmploymentPanelState =
+  | { phase: 'idle' }
+  | { phase: 'loading' }
+  | { phase: 'error' }
+  | { phase: 'ready'; data: EmploymentListResponse };
+
+type EmploymentFormProps = {
+  mode: 'create' | 'update';
+  currentStatus: EmploymentStatus;
+  values: EmploymentFormValues;
+  submitting: boolean;
+  // The parent decides this, because only the parent holds the stored row an
+  // unchanged edit is compared against.
+  unchanged: boolean;
+  error: string | null;
+  onField: (field: keyof EmploymentFormValues, value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onCancel: () => void;
+};
+
+function EmploymentWriteForm({
+  mode,
+  currentStatus,
+  values,
+  submitting,
+  unchanged,
+  error,
+  onField,
+  onSubmit,
+  onCancel,
+}: EmploymentFormProps) {
+  const titleId = `employment-${mode}-title`;
+
+  return (
+    <form
+      className="people-form employment-form"
+      aria-labelledby={titleId}
+      onSubmit={onSubmit}
+    >
+      <h3 id={titleId} className="people-form-title">
+        {mode === 'create' ? 'Add employment' : 'Edit this employment'}
+      </h3>
+
+      <div className="people-form-grid">
+        <div className="field">
+          <label htmlFor="employment-form-type">Employment type</label>
+          <select
+            id="employment-form-type"
+            name="employmentType"
+            value={values.employmentType}
+            disabled={submitting}
+            onChange={(event) =>
+              onField('employmentType', event.target.value)
+            }
+          >
+            {EMPLOYMENT_TYPES.map((type) => (
+              <option value={type} key={type}>
+                {EMPLOYMENT_TYPE_LABELS[type]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="field">
+          <label htmlFor="employment-form-noticeDays">
+            Notice days
+          </label>
+          <input
+            id="employment-form-noticeDays"
+            name="noticeDays"
+            type="number"
+            min={0}
+            max={EMPLOYMENT_NOTICE_DAYS_MAX}
+            step={1}
+            value={values.noticeDays}
+            disabled={submitting}
+            onChange={(event) => onField('noticeDays', event.target.value)}
+          />
+        </div>
+
+        <div className="field">
+          <label htmlFor="employment-form-startDate">
+            Start date
+            <span className="required-mark"> (required)</span>
+          </label>
+          <input
+            id="employment-form-startDate"
+            name="startDate"
+            type="date"
+            value={values.startDate}
+            disabled={submitting}
+            onChange={(event) => onField('startDate', event.target.value)}
+          />
+        </div>
+
+        <div className="field">
+          <label htmlFor="employment-form-endDate">End date</label>
+          <input
+            id="employment-form-endDate"
+            name="endDate"
+            type="date"
+            value={values.endDate}
+            disabled={submitting}
+            onChange={(event) => onField('endDate', event.target.value)}
+          />
+        </div>
+
+        <div className="field">
+          <label htmlFor="employment-form-probationEndDate">
+            Probation end date
+          </label>
+          <input
+            id="employment-form-probationEndDate"
+            name="probationEndDate"
+            type="date"
+            value={values.probationEndDate}
+            disabled={submitting}
+            onChange={(event) => onField('probationEndDate', event.target.value)}
+          />
+        </div>
+
+        {mode === 'update' ? (
+          <div className="field">
+            <label htmlFor="employment-form-status">Status</label>
+            <select
+              id="employment-form-status"
+              name="status"
+              value={values.status}
+              disabled={submitting}
+              onChange={(event) => onField('status', event.target.value)}
+            >
+              {offerableEmploymentStatuses(currentStatus).map((status) => (
+                <option value={status} key={status}>
+                  {EMPLOYMENT_STATUS_LABELS[status]}
+                </option>
+              ))}
+            </select>
+            {currentStatus === 'active' ? null : (
+              <p className="field-hint">
+                This record is already {EMPLOYMENT_STATUS_LABELS[currentStatus].toLowerCase()},
+                so it stays that way.
+              </p>
+            )}
+          </div>
+        ) : null}
+      </div>
+
+      {error ? (
+        <p className="form-alert" role="alert">
+          {error}
+        </p>
+      ) : null}
+
+      <div className="people-form-actions">
+        <button
+          className="button button--primary"
+          type="submit"
+          disabled={
+            submitting ||
+            values.startDate === '' ||
+            (mode === 'update' && unchanged)
+          }
+        >
+          {mode === 'create' ? 'Save employment' : 'Save changes'}
+        </button>
+        <button
+          className="button button--quiet"
+          type="button"
+          onClick={onCancel}
+          disabled={submitting}
+        >
+          Cancel
+        </button>
+      </div>
+
+      <p className="fine-print people-form-note">
+        {mode === 'create'
+          ? 'Employment is separate from directory placement. The legal entity is taken from where this person is placed now, and it never changes on this record. Compensation and payroll are not built here.'
+          : 'This record keeps the legal entity it was written against, even if the person has since been placed elsewhere. Compensation and payroll are not built here.'}
+      </p>
+    </form>
+  );
+}
+
 type PeopleFormProps = {
   mode: 'create' | 'update';
   values: PeopleFormValues;
@@ -423,6 +758,17 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
   const [placementAttempt, setPlacementAttempt] = useState(0);
   const [placementSubmitting, setPlacementSubmitting] = useState(false);
   const [placementError, setPlacementError] = useState<string | null>(null);
+  const [employing, setEmploying] = useState<PeopleListItem | null>(null);
+  const [employmentState, setEmploymentState] =
+    useState<EmploymentPanelState>({ phase: 'idle' });
+  const [employmentAttempt, setEmploymentAttempt] = useState(0);
+  const [employmentForm, setEmploymentForm] = useState<
+    { mode: 'create' } | { mode: 'update'; employment: EmploymentItem } | null
+  >(null);
+  const [employmentValues, setEmploymentValues] =
+    useState<EmploymentFormValues>(EMPTY_EMPLOYMENT_FORM);
+  const [employmentSubmitting, setEmploymentSubmitting] = useState(false);
+  const [employmentError, setEmploymentError] = useState<string | null>(null);
 
   useEffect(() => {
     // A response is dropped once the search or page has moved on, so a slow
@@ -492,6 +838,42 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
     };
   }, [placing, placementAttempt]);
 
+  useEffect(() => {
+    // The history is fetched when the panel opens, not with the directory: it is
+    // the server's own scope answer for this person, and a response that arrives
+    // after the panel moved on is dropped rather than shown against a different
+    // colleague.
+    if (employing === null) {
+      return;
+    }
+    let stale = false;
+    const person = employing;
+
+    async function loadHistory() {
+      setEmploymentState({ phase: 'loading' });
+      const result = await api.employments(person.id);
+      if (stale) {
+        return;
+      }
+      if (!result.ok) {
+        // A 401 is handled by the global listener that returns the app to
+        // sign-in, so the panel simply goes with it.
+        if (result.status !== 401) {
+          setEmploymentState({ phase: 'error' });
+        } else {
+          setEmploying(null);
+        }
+        return;
+      }
+      setEmploymentState({ phase: 'ready', data: result.data });
+    }
+
+    void loadHistory();
+    return () => {
+      stale = true;
+    };
+  }, [employing, employmentAttempt]);
+
   const data = state.phase === 'ready' ? state.data : null;
   const totalPages =
     data === null ? 1 : Math.max(1, Math.ceil(data.total / data.pageSize));
@@ -510,6 +892,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
 
   function openCreateForm() {
     closePlacement();
+    closeEmployment();
     setSavedMessage(null);
     setFormError(null);
     setValues(EMPTY_PEOPLE_FORM);
@@ -518,6 +901,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
 
   function openEditForm(person: PeopleListItem) {
     closePlacement();
+    closeEmployment();
     setSavedMessage(null);
     setFormError(null);
     setValues(formValuesFromPerson(person));
@@ -529,6 +913,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
   // different person.
   function openPlacement(person: PeopleListItem) {
     closeForm();
+    closeEmployment();
     setSavedMessage(null);
     setPlacementError(null);
     setPlacementValue('');
@@ -546,6 +931,85 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
   function retryPlacementOptions() {
     setPlacementError(null);
     setPlacementAttempt((current) => current + 1);
+  }
+
+  function closeEmploymentForm() {
+    setEmploymentForm(null);
+    setEmploymentValues(EMPTY_EMPLOYMENT_FORM);
+    setEmploymentError(null);
+  }
+
+  function closeEmployment() {
+    closeEmploymentForm();
+    setEmploying(null);
+    setEmploymentState({ phase: 'idle' });
+  }
+
+  // Reading a history is not a write, so this opens for anyone who can see the
+  // directory; the add and edit controls inside it appear only for a writer.
+  function openEmployment(person: PeopleListItem) {
+    closeForm();
+    closePlacement();
+    setSavedMessage(null);
+    closeEmploymentForm();
+    setEmploymentState({ phase: 'idle' });
+    setEmploying(person);
+  }
+
+  function retryEmployments() {
+    setEmploymentError(null);
+    setEmploymentAttempt((current) => current + 1);
+  }
+
+  function openEmploymentCreate() {
+    setSavedMessage(null);
+    setEmploymentError(null);
+    setEmploymentValues(EMPTY_EMPLOYMENT_FORM);
+    setEmploymentForm({ mode: 'create' });
+  }
+
+  function openEmploymentEdit(employment: EmploymentItem) {
+    setSavedMessage(null);
+    setEmploymentError(null);
+    setEmploymentValues(formValuesFromEmployment(employment));
+    setEmploymentForm({ mode: 'update', employment });
+  }
+
+  async function submitEmploymentForm(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (employing === null || employmentForm === null || employmentSubmitting) {
+      return;
+    }
+    const mode = employmentForm.mode;
+    setEmploymentSubmitting(true);
+    setEmploymentError(null);
+    const result =
+      mode === 'create'
+        ? await api.createEmployment(
+            employing.id,
+            employmentCreateInput(employmentValues),
+          )
+        : await api.updateEmployment(
+            employing.id,
+            employmentForm.employment.id,
+            employmentUpdateInput(employmentValues),
+          );
+    setEmploymentSubmitting(false);
+
+    if (!result.ok) {
+      if (result.status === 401) {
+        // The global listener is taking the app back to sign-in.
+        closeEmployment();
+        return;
+      }
+      setEmploymentError(employmentWriteErrorCopy(result.code));
+      return;
+    }
+
+    closeEmploymentForm();
+    setSavedMessage(mode === 'create' ? 'Employment added.' : 'Employment updated.');
+    // Reload the same person's history the panel is already showing.
+    setEmploymentAttempt((current) => current + 1);
   }
 
   async function submitForm(event: FormEvent<HTMLFormElement>) {
@@ -621,6 +1085,12 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
     placing !== null &&
     chosenPlacement.legalEntityId === placing.legalEntityId &&
     chosenPlacement.orgUnitId === placing.orgUnitId;
+  // The same rule for an employment edit: every key is stated, so an unchanged
+  // form would be refused no work by the server and would need an audit row.
+  const employmentIsUnchanged =
+    employmentForm !== null &&
+    employmentForm.mode === 'update' &&
+    employmentFormMatches(employmentValues, employmentForm.employment);
 
   return (
     <article className="page page--people">
@@ -662,7 +1132,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
               className="button button--primary button--small"
               type="button"
               onClick={openCreateForm}
-              disabled={form !== null || placing !== null}
+              disabled={form !== null || placing !== null || employing !== null}
             >
               Add person
             </button>
@@ -788,9 +1258,154 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
 
                 <p className="fine-print">
                   Placement is a directory attribute, not an employment record.
-                  Status, employment and compensation are not editable here yet.
+                  Use Employment on this row for dates and status. Compensation
+                  is not editable anywhere yet.
                 </p>
               </form>
+            ) : null}
+          </div>
+        ) : null}
+
+        {employing ? (
+          <div
+            className="placement-panel employment-panel"
+            aria-labelledby="employment-panel-title"
+          >
+            <div className="employment-panel-head">
+              <h3 id="employment-panel-title" className="people-form-title">
+                Employment for {employing.displayName}
+              </h3>
+              <button
+                className="button button--quiet button--small"
+                type="button"
+                onClick={closeEmployment}
+                disabled={employmentSubmitting}
+              >
+                Close
+              </button>
+            </div>
+
+            {employmentState.phase === 'loading' ? (
+              <p className="placement-state">Loading the employment history…</p>
+            ) : null}
+
+            {employmentState.phase === 'error' ? (
+              <div className="placement-state">
+                <p className="form-alert" role="alert">
+                  {EMPLOYMENT_LIST_ERROR}
+                </p>
+                <button
+                  className="button button--quiet button--small"
+                  type="button"
+                  onClick={retryEmployments}
+                >
+                  Try again
+                </button>
+              </div>
+            ) : null}
+
+            {employmentState.phase === 'ready' ? (
+              <div className="employment-body">
+                {employmentState.data.items.length === 0 ? (
+                  <p className="fine-print placement-empty">
+                    No employment is recorded for this person yet.
+                  </p>
+                ) : (
+                  <div className="directory-scroll">
+                    <table
+                      className="directory-table employment-table"
+                      aria-label={`Employment history for ${employing.displayName}`}
+                    >
+                      <thead>
+                        <tr>
+                          <th scope="col">Legal entity</th>
+                          <th scope="col">Type</th>
+                          <th scope="col">Period</th>
+                          <th scope="col">Probation end</th>
+                          <th scope="col">Notice days</th>
+                          <th scope="col">Status</th>
+                          {canWrite ? <th scope="col">Actions</th> : null}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {employmentState.data.items.map((employment) => (
+                          <tr key={employment.id}>
+                            <th scope="row">{employment.legalEntityName ?? '—'}</th>
+                            <td>
+                              {EMPLOYMENT_TYPE_LABELS[employment.employmentType]}
+                            </td>
+                            <td>{employmentPeriod(employment)}</td>
+                            <td>{employment.probationEndDate ?? '—'}</td>
+                            <td>{employment.noticeDays ?? '—'}</td>
+                            <td>
+                              <span
+                                className={`badge employment-status employment-status--${employment.status}`}
+                              >
+                                {EMPLOYMENT_STATUS_LABELS[employment.status]}
+                              </span>
+                            </td>
+                            {canWrite ? (
+                              <td className="directory-actions">
+                                <button
+                                  className="button button--quiet button--small"
+                                  type="button"
+                                  aria-label={`Edit employment from ${employment.startDate}`}
+                                  onClick={() => openEmploymentEdit(employment)}
+                                  disabled={
+                                    employmentForm !== null || employmentSubmitting
+                                  }
+                                >
+                                  Edit
+                                </button>
+                              </td>
+                            ) : null}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {employmentForm ? (
+                  <EmploymentWriteForm
+                    mode={employmentForm.mode}
+                    currentStatus={
+                      employmentForm.mode === 'update'
+                        ? employmentForm.employment.status
+                        : 'active'
+                    }
+                    values={employmentValues}
+                    submitting={employmentSubmitting}
+                    unchanged={employmentIsUnchanged}
+                    error={employmentError}
+                    onField={(field, value) =>
+                      setEmploymentValues((current) => ({
+                        ...current,
+                        [field]: value,
+                      }))
+                    }
+                    onSubmit={(event) => void submitEmploymentForm(event)}
+                    onCancel={closeEmploymentForm}
+                  />
+                ) : canWrite ? (
+                  <div className="people-form-actions">
+                    <button
+                      className="button button--primary button--small"
+                      type="button"
+                      onClick={openEmploymentCreate}
+                    >
+                      Add employment
+                    </button>
+                  </div>
+                ) : null}
+
+                <p className="fine-print employment-note">
+                  Employment is separate from directory placement. Each record
+                  keeps the legal entity this person was placed on when the record
+                  was made, and a later placement does not change it. Compensation
+                  and payroll are not built here.
+                </p>
+              </div>
             ) : null}
           </div>
         ) : null}
@@ -818,7 +1433,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
                   <th scope="col">Work email</th>
                   <th scope="col">Phone</th>
                   <th scope="col">Placement</th>
-                  {canWrite ? <th scope="col">Actions</th> : null}
+                  <th scope="col">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -829,28 +1444,49 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
                     <td>{person.workEmail ?? '—'}</td>
                     <td>{person.phone ?? '—'}</td>
                     <td>{placementCopy(person) === '' ? '—' : placementCopy(person)}</td>
-                    {canWrite ? (
-                      <td className="directory-actions">
-                        <button
-                          className="button button--quiet button--small"
-                          type="button"
-                          aria-label={`Edit ${person.displayName}`}
-                          onClick={() => openEditForm(person)}
-                          disabled={placing !== null}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          className="button button--quiet button--small"
-                          type="button"
-                          aria-label={`Place ${person.displayName}`}
-                          onClick={() => openPlacement(person)}
-                          disabled={form !== null || placing?.id === person.id}
-                        >
-                          Place
-                        </button>
-                      </td>
-                    ) : null}
+                    <td className="directory-actions">
+                      {canWrite ? (
+                        <>
+                          <button
+                            className="button button--quiet button--small"
+                            type="button"
+                            aria-label={`Edit ${person.displayName}`}
+                            onClick={() => openEditForm(person)}
+                            disabled={placing !== null || employing !== null}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            className="button button--quiet button--small"
+                            type="button"
+                            aria-label={`Place ${person.displayName}`}
+                            onClick={() => openPlacement(person)}
+                            disabled={
+                              form !== null ||
+                              employing !== null ||
+                              placing?.id === person.id
+                            }
+                          >
+                            Place
+                          </button>
+                        </>
+                      ) : null}
+                      {/* Reading a history is a read, so this row action belongs
+                          to every member who sees the row, not only to a writer. */}
+                      <button
+                        className="button button--quiet button--small"
+                        type="button"
+                        aria-label={`Employment ${person.displayName}`}
+                        onClick={() => openEmployment(person)}
+                        disabled={
+                          form !== null ||
+                          placing !== null ||
+                          employing?.id === person.id
+                        }
+                      >
+                        Employment
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>

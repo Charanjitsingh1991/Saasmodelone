@@ -1,6 +1,8 @@
 # ADR 0009 — Placement is a separate, whole-pair write onto an existing person, decided by the scope helper
 
-Status: accepted · October 2026 · M1 slice 5 (T20)
+Status: accepted · October 2026 · M1 slice 5 (T20) · clauses 15 and the Not-built list carry
+amendment notes from [ADR 0010](0010-people-employment.md), which made employment dates and status
+editable in the next slice
 
 ## Context
 
@@ -170,7 +172,13 @@ Three constraints shape the design:
     identity form uses and reloads the current query and page. Each placement failure code has its
     own copy and no raw server message is rendered; the fine print states that placement is a
     directory attribute, not an employment record, and that status, employment and compensation
-    are not editable here yet.
+    are not editable here yet. *(Amended by
+    [`0010-people-employment.md`](0010-people-employment.md) §15: the next slice made employment
+    dates and status editable, in their own Employment panel on the same row, so this fine print
+    now points members at that action rather than telling them the screen cannot be reached; the
+    honest remainder stands — compensation is not editable anywhere yet. The shipped sentence is
+    "Placement is a directory attribute, not an employment record. Use Employment on this row for
+    dates and status. Compensation is not editable anywhere yet.")*
 
 ## Consequences
 
@@ -216,7 +224,13 @@ today. No org-tree or descendant view, no bulk placement or re-parenting, no pla
 export, no per-person detail route, no placement history read, no approval on a move, no undo. No
 write to `status`, `location_id`, `manager_person_id`, `designation`, `employment_type`, either
 date column, `personal_email`, the demographic or import columns or `user_id`; no employment,
-compensation or bank write; no delete, restore or soft-delete. Legal-entity-scoped placement of a
+compensation or bank write; no delete, restore or soft-delete. *(Amended by
+[`0010-people-employment.md`](0010-people-employment.md) §1, §3 and §5: the next slice did add an
+employment write — a dated `employment` row and its forward-only status, on the entity the
+placement already holds — while every `person` column named in this sentence is still unwritten by
+any member route — the new write lands on the separate `employment` table's own `employment_type`
+and date columns, never on `person` — and compensation and bank remain unwritten anywhere.)*
+Legal-entity-scoped placement of a
 person into an entity that is not the member's own remains impossible by policy, not by
 validation. Nothing in this slice has run in CI: the GitHub account is annotated as locked for
 billing and no job has executed a step.

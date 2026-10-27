@@ -4,6 +4,9 @@ import {
   hasPermission,
   permissionFor,
   permissionsForRole,
+  EMPLOYMENT_NOTICE_DAYS_MAX,
+  EMPLOYMENT_STATUSES,
+  EMPLOYMENT_TYPES,
   PEOPLE_LIST_DEFAULT_PAGE_SIZE,
   PEOPLE_LIST_MAX_PAGE_SIZE,
   PEOPLE_SEARCH_MAX_LENGTH,
@@ -14,6 +17,10 @@ import {
   PERSON_WORK_EMAIL_MAX_LENGTH,
   type ContextModule,
   type ContextResponse,
+  type EmploymentItem,
+  type EmploymentListResponse,
+  type EmploymentStatus,
+  type EmploymentType,
   type PeopleListItem,
   type PeopleListResponse,
   type PeoplePlacementInput,
@@ -530,6 +537,251 @@ function parsePeoplePlacement(body: unknown): PeoplePlacementInput {
     throw new ApiError(400, 'INVALID_BODY');
   }
   return ids;
+}
+
+// The employment values this slice may write. work_jurisdiction_id, the source
+// and import columns and both timestamps are absent because no route here
+// records a jurisdiction, an import or a system-managed history, and status is
+// absent from create because a new row always starts active.
+const EMPLOYMENT_WRITE_FIELDS = [
+  'employmentType',
+  'startDate',
+  'endDate',
+  'probationEndDate',
+  'noticeDays',
+] as const;
+
+const EMPLOYMENT_PATCH_FIELDS = [...EMPLOYMENT_WRITE_FIELDS, 'status'] as const;
+
+type EmploymentPatchField = (typeof EMPLOYMENT_PATCH_FIELDS)[number];
+
+const EMPLOYMENT_COLUMNS: Record<EmploymentPatchField, string> = {
+  employmentType: 'employment_type',
+  startDate: 'start_date',
+  endDate: 'end_date',
+  probationEndDate: 'probation_end_date',
+  noticeDays: 'notice_days',
+  status: 'status',
+};
+
+// The five writable values of one row. The patch route fills the gaps from the
+// stored row, so both routes decide their invariants over one complete shape.
+type EmploymentValues = {
+  employmentType: EmploymentType;
+  startDate: string;
+  endDate: string | null;
+  probationEndDate: string | null;
+  noticeDays: number | null;
+};
+
+type EmploymentWriteParse = {
+  // Field names the caller actually sent, so the audit can record which fields
+  // were written without recording a date, a notice period or a status.
+  present: EmploymentPatchField[];
+  values: Partial<EmploymentValues>;
+  status: EmploymentStatus | undefined;
+};
+
+// A date column holds one real day, so both the shape and the calendar are
+// checked here: 2026-02-30 has a valid shape and no such day exists, and an
+// impossible date that reached SQL would answer as a 500 the client cannot act
+// on. Years are four digits and zero-padded on the way in, which is also what
+// makes the string comparison below a date comparison.
+function employmentDate(value: unknown): string {
+  if (typeof value !== 'string') {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (parts === null) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  const year = Number(parts[1]);
+  const month = Number(parts[2]);
+  const day = Number(parts[3]);
+  if (
+    year < 1 ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > daysInMonth(year, month)
+  ) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  return value;
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    return isLeapYear(year) ? 29 : 28;
+  }
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
+}
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+// The table only requires notice_days >= 0, so this ceiling exists nowhere else.
+function employmentNoticeDays(value: unknown): number {
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < 0 ||
+    value > EMPLOYMENT_NOTICE_DAYS_MAX
+  ) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  return value;
+}
+
+// One list check for both enums, so a value outside the contract never reaches
+// the column CHECK and answers as a database error.
+function employmentEnumValue<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+): T {
+  if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  return value as T;
+}
+
+// One parser for both writes: create takes exactly the five writable fields and
+// must name the type and the start date, patch takes any non-empty subset of
+// those five plus status. An absent key leaves the stored value alone, a null
+// clears an optional date or the notice days, and a null for employmentType,
+// startDate or status is refused because a row always holds all three.
+function parseEmploymentWrite(
+  body: Record<string, unknown>,
+  mode: 'create' | 'patch',
+): EmploymentWriteParse {
+  const allowed = mode === 'create' ? EMPLOYMENT_WRITE_FIELDS : EMPLOYMENT_PATCH_FIELDS;
+  for (const key of Object.keys(body)) {
+    if (!(allowed as readonly string[]).includes(key)) {
+      throw new ApiError(400, 'INVALID_BODY');
+    }
+  }
+
+  const present: EmploymentPatchField[] = [];
+  const values: Partial<EmploymentValues> = {};
+  let status: EmploymentStatus | undefined;
+
+  for (const field of allowed) {
+    if (!Object.hasOwn(body, field)) {
+      continue;
+    }
+    const raw = body[field];
+
+    if (field === 'employmentType') {
+      values.employmentType = employmentEnumValue(raw, EMPLOYMENT_TYPES);
+    } else if (field === 'noticeDays') {
+      // notice_days is nullable, so a null is a clearing rather than a type
+      // error, on both modes.
+      values.noticeDays = raw === null ? null : employmentNoticeDays(raw);
+    } else if (field === 'status') {
+      status = employmentEnumValue(raw, EMPLOYMENT_STATUSES);
+    } else if (field === 'startDate') {
+      values.startDate = employmentDate(raw);
+    } else if (raw === null) {
+      values[field] = null;
+    } else {
+      values[field] = employmentDate(raw);
+    }
+    present.push(field);
+  }
+
+  if (present.length === 0) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  if (
+    mode === 'create' &&
+    (values.employmentType === undefined || values.startDate === undefined)
+  ) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  return { present, values, status };
+}
+
+// Two dates or a status that contradict each other are a bad request, not a
+// database rejection: the end date follows the start, probation follows the
+// start, and a row that says it has ended has to say when. The probation rule
+// and the ended-needs-an-end-date rule have no database CHECK, so they live here
+// with the one that does.
+function checkEmploymentValues(
+  values: EmploymentValues,
+  status: EmploymentStatus,
+): void {
+  if (
+    (values.endDate !== null && values.endDate < values.startDate) ||
+    (values.probationEndDate !== null &&
+      values.probationEndDate < values.startDate) ||
+    (status === 'ended' && values.endDate === null)
+  ) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+}
+
+// Status only moves forward. Reopening an ended row, cancelling an ended one, or
+// reviving a cancelled one would rewrite history the directory has already
+// reported, and a payroll run built on that row later would inherit the rewrite.
+function checkEmploymentTransition(
+  current: EmploymentStatus,
+  next: EmploymentStatus,
+): void {
+  if (current === next || (current === 'active' && next !== 'active')) {
+    return;
+  }
+  throw new ApiError(409, 'EMPLOYMENT_STATUS_TRANSITION_INVALID');
+}
+
+// One shared read behind every employment response - list, create read-back and
+// patch read-back - so all three answer with the same ten keys. The dates are
+// formatted in SQL because the wire shape is one calendar day, not a timestamp a
+// session timezone can shift; the entity id comes from the employment row and the
+// name from the reference row, so a retired legal entity loses its name while
+// the history keeps naming the entity it was written against.
+const EMPLOYMENT_SELECT = `select e.id,
+                    e.person_id,
+                    e.legal_entity_id,
+                    le.name as legal_entity_name,
+                    e.employment_type,
+                    to_char(e.start_date, 'YYYY-MM-DD') as start_date,
+                    to_char(e.end_date, 'YYYY-MM-DD') as end_date,
+                    to_char(e.probation_end_date, 'YYYY-MM-DD') as probation_end_date,
+                    e.notice_days,
+                    e.status`;
+
+const EMPLOYMENT_FROM = `from employment e
+          left join legal_entity le on le.id = e.legal_entity_id and le.deleted_at is null`;
+
+const EMPLOYMENT_ORDER = 'order by e.start_date desc, e.id';
+
+type EmploymentRow = {
+  id: string;
+  person_id: string;
+  legal_entity_id: string;
+  legal_entity_name: string | null;
+  employment_type: EmploymentType;
+  start_date: string;
+  end_date: string | null;
+  probation_end_date: string | null;
+  notice_days: number | null;
+  status: EmploymentStatus;
+};
+
+function employmentItemFromRow(row: EmploymentRow): EmploymentItem {
+  return {
+    id: row.id,
+    personId: row.person_id,
+    legalEntityId: row.legal_entity_id,
+    legalEntityName: row.legal_entity_name,
+    employmentType: row.employment_type,
+    startDate: row.start_date,
+    endDate: row.end_date,
+    probationEndDate: row.probation_end_date,
+    noticeDays: row.notice_days,
+    status: row.status,
+  };
 }
 
 function validateRateLimit(options: RateLimitOptions, name: string): RateLimitOptions {
@@ -1400,6 +1652,357 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
             throw new ApiError(500, 'INTERNAL_ERROR');
           }
           return peopleItemFromRow(row);
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  app.get('/v1/people/:id/employments', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+
+    const personId = (request.params as { id?: unknown }).id;
+
+    try {
+      // A read, so every member who may read People may open a history - not only
+      // a writer. The member transaction sets app.tenant_id and app.user_id, and
+      // employment's own tenant_isolation plus scope_read policies narrow the
+      // rows; no scope predicate is restated here.
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'people', operation: 'read' },
+        },
+        async (client) => {
+          // Inside the gated transaction, after entitlement and role, so a denied
+          // caller is denied the same way whatever the id looks like.
+          if (typeof personId !== 'string' || !UUID_TEXT_PATTERN.test(personId)) {
+            throw new ApiError(404, 'PERSON_NOT_FOUND');
+          }
+
+          // The person read is the scope test, and it answers with the directory's
+          // own miss: unknown, malformed, soft-deleted, another tenant or out of
+          // scope are one PERSON_NOT_FOUND, so a history route cannot be used to
+          // enumerate people a member may not list.
+          const personRows = await client.query<PeopleListRow>(
+            `${DIRECTORY_SELECT}
+              ${DIRECTORY_FROM}
+              where p.id = $1 and p.deleted_at is null`,
+            [personId],
+          );
+          if (!personRows.rows[0]) {
+            throw new ApiError(404, 'PERSON_NOT_FOUND');
+          }
+
+          const rows = await client.query<EmploymentRow>(
+            `${EMPLOYMENT_SELECT}
+              ${EMPLOYMENT_FROM}
+              where e.person_id = $1
+              ${EMPLOYMENT_ORDER}`,
+            [personId],
+          );
+          const items = rows.rows.map(employmentItemFromRow);
+          const body: EmploymentListResponse = { items, total: items.length };
+          return body;
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  app.post('/v1/people/:id/employments', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+    requireCsrfToken(session, request);
+
+    const personId = (request.params as { id?: unknown }).id;
+
+    try {
+      const item = await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'people', operation: 'write' },
+        },
+        async (client) => {
+          if (typeof personId !== 'string' || !UUID_TEXT_PATTERN.test(personId)) {
+            throw new ApiError(404, 'PERSON_NOT_FOUND');
+          }
+
+          const parsed = parseEmploymentWrite(peopleWriteObject(request.body), 'create');
+          const values: EmploymentValues = {
+            employmentType: parsed.values.employmentType as EmploymentType,
+            startDate: parsed.values.startDate as string,
+            endDate: parsed.values.endDate ?? null,
+            probationEndDate: parsed.values.probationEndDate ?? null,
+            noticeDays: parsed.values.noticeDays ?? null,
+          };
+          // A new row is active, so the only status rule that can be broken on this
+          // path is the date order.
+          checkEmploymentValues(values, 'active');
+
+          const personRows = await client.query<PeopleListRow>(
+            `${DIRECTORY_SELECT}
+              ${DIRECTORY_FROM}
+              where p.id = $1 and p.deleted_at is null`,
+            [personId],
+          );
+          const personRow = personRows.rows[0];
+          if (!personRow) {
+            throw new ApiError(404, 'PERSON_NOT_FOUND');
+          }
+
+          // The helper answers with app.person_in_scope, while the directory read
+          // above answers with app.person_visible, and the two are not the same: a
+          // scoped member may see the person row linked to their own user account
+          // but may not maintain it. The helper answers first so the client gets a
+          // typed 403, and scope_insert is the database half of the same rule.
+          const writable = await client.query<{ allowed: boolean }>(
+            'select app.person_in_scope($1) as allowed',
+            [personId],
+          );
+          if (!writable.rows[0]?.allowed) {
+            throw new ApiError(403, 'SCOPE_DENIED');
+          }
+
+          // The legal entity is never supplied by the caller: it is the person's own
+          // placement at this moment. That makes the employment's reach exactly the
+          // member's reach over the person, and it keeps a later placement move from
+          // rewriting history already recorded under the old entity.
+          const storedEntityId = personRow.legal_entity_id;
+          if (storedEntityId === null) {
+            throw new ApiError(409, 'EMPLOYMENT_ENTITY_REQUIRED');
+          }
+
+          const entity = await client.query<{ id: string }>(
+            `select le.id
+               from legal_entity le
+              where le.id = $1 and le.deleted_at is null`,
+            [storedEntityId],
+          );
+          if (!entity.rows[0]) {
+            // A retired entity is no place to start a record either, and the answer
+            // is the same as for no placement at all because the fix is the same.
+            throw new ApiError(409, 'EMPLOYMENT_ENTITY_REQUIRED');
+          }
+
+          // The id is generated here for the reason ADR 0008 gives for person: the
+          // row is read back inside this transaction, its response carries a joined
+          // column, and the audit entry needs the id before the answer is sent.
+          const id = randomUUID();
+          await client.query(
+            `insert into employment
+               (id, tenant_id, person_id, legal_entity_id, employment_type,
+                start_date, end_date, probation_end_date, notice_days)
+             values
+               ($1, app.current_tenant_id(), $2, $3, $4, $5, $6, $7, $8)`,
+            [
+              id,
+              personId,
+              storedEntityId,
+              values.employmentType,
+              values.startDate,
+              values.endDate,
+              values.probationEndDate,
+              values.noticeDays,
+            ],
+          );
+
+          // status is absent from the column list, so the database default is the
+          // only source of it and nothing the client sent can choose it.
+          const created = await client.query<EmploymentRow>(
+            `${EMPLOYMENT_SELECT}
+              ${EMPLOYMENT_FROM}
+              where e.id = $1`,
+            [id],
+          );
+          const row = created.rows[0];
+          if (!row) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          await appendAuditEvent(client, {
+            action: 'employment.created',
+            entityType: 'employment',
+            entityId: id,
+            actorType: 'user',
+            actorUserId: session.userId,
+            // Field names only: no date, notice period or status is copied into
+            // the audit trail, because they are all still readable on the row.
+            metadata: { module: 'people', fields: [...parsed.present].sort() },
+            ip: request.ip,
+            userAgent: request.headers['user-agent'] ?? null,
+          });
+
+          return employmentItemFromRow(row);
+        },
+      );
+
+      reply.code(201);
+      return item;
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  app.patch('/v1/people/:id/employments/:employmentId', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+    requireCsrfToken(session, request);
+
+    const personId = (request.params as { id?: unknown }).id;
+    const employmentId = (request.params as { employmentId?: unknown }).employmentId;
+
+    try {
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'people', operation: 'write' },
+        },
+        async (client) => {
+          if (typeof personId !== 'string' || !UUID_TEXT_PATTERN.test(personId)) {
+            throw new ApiError(404, 'PERSON_NOT_FOUND');
+          }
+          if (
+            typeof employmentId !== 'string' ||
+            !UUID_TEXT_PATTERN.test(employmentId)
+          ) {
+            throw new ApiError(404, 'EMPLOYMENT_NOT_FOUND');
+          }
+
+          const parsed = parseEmploymentWrite(peopleWriteObject(request.body), 'patch');
+
+          // The person first, so a member who may not reach this colleague gets the
+          // directory's own miss rather than a verdict about a history row.
+          const personRows = await client.query<PeopleListRow>(
+            `${DIRECTORY_SELECT}
+              ${DIRECTORY_FROM}
+              where p.id = $1 and p.deleted_at is null`,
+            [personId],
+          );
+          if (!personRows.rows[0]) {
+            throw new ApiError(404, 'PERSON_NOT_FOUND');
+          }
+
+          // Addressed by its id and its person, so a row belonging to someone else
+          // is the same answer as a row that does not exist, and no id in another
+          // part of the tenant can be probed through this path.
+          const current = await client.query<EmploymentRow>(
+            `${EMPLOYMENT_SELECT}
+              ${EMPLOYMENT_FROM}
+              where e.id = $1 and e.person_id = $2`,
+            [employmentId, personId],
+          );
+          const currentRow = current.rows[0];
+          if (!currentRow) {
+            throw new ApiError(404, 'EMPLOYMENT_NOT_FOUND');
+          }
+          const currentItem = employmentItemFromRow(currentRow);
+
+          // The row is readable but this member may not maintain the person it
+          // belongs to: app.person_visible (the read predicate the directory and
+          // this route's reads use) and app.person_in_scope (the write predicate
+          // employment's scope_update policy uses) are not the same. The helper
+          // answers first so the client gets a typed 403 instead of an UPDATE that
+          // matches nothing, and scope_update stays the database half of the rule.
+          const writable = await client.query<{ allowed: boolean }>(
+            'select app.person_in_scope($1) as allowed',
+            [personId],
+          );
+          if (!writable.rows[0]?.allowed) {
+            throw new ApiError(403, 'SCOPE_DENIED');
+          }
+
+          // An absent key keeps the stored value; a present one states it, and for
+          // the two optional dates and the notice days a null states "cleared".
+          // employmentType and startDate cannot be null, so the parser already
+          // refused that.
+          const values: EmploymentValues = {
+            employmentType: parsed.values.employmentType ?? currentItem.employmentType,
+            startDate: parsed.values.startDate ?? currentItem.startDate,
+            endDate: Object.hasOwn(parsed.values, 'endDate')
+              ? parsed.values.endDate ?? null
+              : currentItem.endDate,
+            probationEndDate: Object.hasOwn(parsed.values, 'probationEndDate')
+              ? parsed.values.probationEndDate ?? null
+              : currentItem.probationEndDate,
+            noticeDays: Object.hasOwn(parsed.values, 'noticeDays')
+              ? parsed.values.noticeDays ?? null
+              : currentItem.noticeDays,
+          };
+          const nextStatus = parsed.status ?? currentItem.status;
+
+          checkEmploymentTransition(currentItem.status, nextStatus);
+          checkEmploymentValues(values, nextStatus);
+
+          const changed = EMPLOYMENT_PATCH_FIELDS.filter((field) =>
+            field === 'status'
+              ? nextStatus !== currentItem.status
+              : values[field] !== currentItem[field],
+          ).sort();
+
+          if (changed.length === 0) {
+            // Nothing moved: no UPDATE, no audit row, and the stored row answers.
+            return currentItem;
+          }
+
+          const setValues: unknown[] = [];
+          const assignments = changed.map((field) => {
+            setValues.push(field === 'status' ? nextStatus : values[field]);
+            return `${EMPLOYMENT_COLUMNS[field]} = $${setValues.length}`;
+          });
+
+          const updated = await client.query(
+            `update employment
+                set ${assignments.join(', ')}
+              where id = $${setValues.length + 1}
+                and person_id = $${setValues.length + 2}`,
+            [...setValues, employmentId, personId],
+          );
+          // One row or none: a statement that succeeded but matched nothing would
+          // mean the policy moved under the transaction, so the write and its audit
+          // row both roll back to a sanitized 500.
+          if (updated.rowCount !== 1) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          const written = await client.query<EmploymentRow>(
+            `${EMPLOYMENT_SELECT}
+              ${EMPLOYMENT_FROM}
+              where e.id = $1 and e.person_id = $2`,
+            [employmentId, personId],
+          );
+          const row = written.rows[0];
+          if (!row) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          await appendAuditEvent(client, {
+            action: 'employment.updated',
+            entityType: 'employment',
+            entityId: employmentId,
+            actorType: 'user',
+            actorUserId: session.userId,
+            metadata: { module: 'people', changedFields: changed },
+            ip: request.ip,
+            userAgent: request.headers['user-agent'] ?? null,
+          });
+
+          return employmentItemFromRow(row);
         },
       );
     } catch (error) {

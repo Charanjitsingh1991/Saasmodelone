@@ -91,3 +91,77 @@ export type PeoplePlacementOptions = {
   legalEntities: PeoplePlacementOptionEntity[];
   orgUnits: PeoplePlacementOptionOrgUnit[];
 };
+
+// The employment history values this slice may write. They are the CHECK lists
+// already on the employment table, restated so a route can reject a value
+// before it reaches SQL and a screen can offer exactly the allowed choices.
+export const EMPLOYMENT_TYPES = [
+  'full_time',
+  'part_time',
+  'contract',
+  'intern',
+  'consultant',
+] as const;
+
+export type EmploymentType = (typeof EMPLOYMENT_TYPES)[number];
+
+export const EMPLOYMENT_STATUSES = ['active', 'ended', 'cancelled'] as const;
+
+export type EmploymentStatus = (typeof EMPLOYMENT_STATUSES)[number];
+
+// The table only requires notice_days >= 0, so the upper bound is a request
+// contract: without it a single keystroke could store a notice period of
+// centuries. The screen and the route both read this one number.
+export const EMPLOYMENT_NOTICE_DAYS_MAX = 3650;
+
+// Dates on the wire are always 'YYYY-MM-DD' strings, never Date objects, so a
+// list, a create and an update read-back serialise identically and no timezone
+// can shift a stored day.
+export type EmploymentItem = {
+  id: string;
+  personId: string;
+  // The legal entity is non-null because a row cannot exist without one; the
+  // name follows the same rule the directory uses - it is read from the
+  // reference row and is null once that row is soft-deleted.
+  legalEntityId: string;
+  legalEntityName: string | null;
+  employmentType: EmploymentType;
+  startDate: string;
+  endDate: string | null;
+  probationEndDate: string | null;
+  noticeDays: number | null;
+  status: EmploymentStatus;
+};
+
+// Every row the member can see for this person, newest first. There is no
+// paging: one person's history is small, and a page boundary would hide the end
+// of a career behind a "next" click.
+export type EmploymentListResponse = {
+  items: EmploymentItem[];
+  total: number;
+};
+
+// What a create accepts. There is no personId - it comes from the path - and no
+// legalEntityId, because the entity is derived from the person's placement at
+// the moment of writing. No status (a new row is active), no
+// work_jurisdiction_id, no source or import columns and no timestamps: the
+// runtime holds no write privilege on any of them.
+export type EmploymentCreateInput = {
+  employmentType: EmploymentType;
+  startDate: string;
+  endDate?: string | null;
+  probationEndDate?: string | null;
+  noticeDays?: number | null;
+};
+
+// Partial by design, like the identity patch: an absent key means "unchanged".
+// A null clears one of the two optional dates or the notice days, and is
+// rejected for employmentType, startDate and status, which a row always has.
+export type EmploymentUpdateInput = {
+  employmentType?: EmploymentType;
+  startDate?: string;
+  endDate?: string | null;
+  probationEndDate?: string | null;
+  noticeDays?: number | null;
+  status?: EmploymentStatus;
+};

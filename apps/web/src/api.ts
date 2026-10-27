@@ -1,5 +1,9 @@
 import type {
   ContextResponse,
+  EmploymentCreateInput,
+  EmploymentItem,
+  EmploymentListResponse,
+  EmploymentUpdateInput,
   PeopleCreateInput,
   PeopleListItem,
   PeopleListResponse,
@@ -144,6 +148,36 @@ export const api = {
       headers: writeHeaders(),
       body: JSON.stringify(input),
     }),
+
+  // One person's employment history. A GET, so no CSRF header; the server gates
+  // it on people.read and every row is narrowed by this member's own scope.
+  employments: (id: string) =>
+    request<EmploymentListResponse>(
+      `/v1/people/${encodeURIComponent(id)}/employments`,
+    ),
+
+  // The legal entity is not sent: the server takes it from the person's current
+  // placement, so a client cannot name an entity it was never offered.
+  createEmployment: (id: string, input: EmploymentCreateInput) =>
+    request<EmploymentItem>(`/v1/people/${encodeURIComponent(id)}/employments`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify(input),
+    }),
+
+  updateEmployment: (
+    id: string,
+    employmentId: string,
+    input: EmploymentUpdateInput,
+  ) =>
+    request<EmploymentItem>(
+      `/v1/people/${encodeURIComponent(id)}/employments/${encodeURIComponent(employmentId)}`,
+      {
+        method: 'PATCH',
+        headers: writeHeaders(),
+        body: JSON.stringify(input),
+      },
+    ),
 
   login: (input: LoginInput) =>
     request<SessionResponse>('/v1/auth/login', {

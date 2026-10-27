@@ -2,6 +2,12 @@ export const PRODUCT_NAME = 'SaaSModels One';
 
 export type { ContextModule, ContextResponse, SessionResponse } from './context.js';
 export type {
+  EmploymentCreateInput,
+  EmploymentItem,
+  EmploymentListResponse,
+  EmploymentStatus,
+  EmploymentType,
+  EmploymentUpdateInput,
   PeopleCreateInput,
   PeopleListItem,
   PeopleListResponse,
@@ -12,6 +18,9 @@ export type {
   PeopleUpdateInput,
 } from './people.js';
 export {
+  EMPLOYMENT_NOTICE_DAYS_MAX,
+  EMPLOYMENT_STATUSES,
+  EMPLOYMENT_TYPES,
   PERSON_DISPLAY_NAME_MAX_LENGTH,
   PERSON_EMPLOYEE_CODE_MAX_LENGTH,
   PERSON_NAME_MAX_LENGTH,
