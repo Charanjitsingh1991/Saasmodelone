@@ -1,5 +1,7 @@
 import { Fragment, useEffect, useState, type FormEvent } from 'react';
 import type {
+  CompensationListResponse,
+  CompensationPayFrequency,
   ContextResponse,
   EmploymentCreateInput,
   EmploymentItem,
@@ -30,7 +32,9 @@ import { api } from '../api';
 import {
   accessLabel,
   availableModuleNames,
+  canReadCompensation,
   findModule,
+  formatCompensationAmount,
   orderModules,
   roleLabel,
 } from '../lib/model';
@@ -482,6 +486,55 @@ type EmploymentPanelState =
   | { phase: 'error' }
   | { phase: 'ready'; data: EmploymentListResponse };
 
+// The pay frequency is one of four stored words a member cannot type, so it is
+// labelled from the contract's own vocabulary rather than a string made up here.
+// The amount and currency are shown exactly as stored: this panel does not say
+// whether a figure is a period's pay or a year's, because nothing in this build
+// decides that and the table records no rule for it.
+const COMPENSATION_PAY_FREQUENCY_LABELS: Record<
+  CompensationPayFrequency,
+  string
+> = {
+  monthly: 'Monthly',
+  semi_monthly: 'Semi-monthly',
+  biweekly: 'Biweekly',
+  weekly: 'Weekly',
+};
+
+// Every failure this read can return has copy of its own, so the panel never
+// shows a raw server message and never shows a history it did not get. There is
+// no 401 line: the global listener takes the whole app back to sign-in.
+const COMPENSATION_ERROR_COPY: Record<string, string> = {
+  PERSON_NOT_FOUND: 'That person is no longer available to you.',
+  ROLE_DENIED:
+    'Your role can open the directory but not salary history. Reading pay needs the compensation read permission.',
+  MODULE_NOT_ENTITLED:
+    'People is not enabled for this workspace, so its records cannot be opened.',
+  MEMBERSHIP_DENIED: 'You no longer hold a seat in this workspace.',
+  PLATFORM_ACCESS_DENIED:
+    'This workspace is no longer open to your account.',
+  NETWORK:
+    'The workspace could not be reached. Check your connection and try again.',
+};
+
+const COMPENSATION_ERROR_FALLBACK =
+  'The compensation history could not be loaded. Try again.';
+
+function compensationErrorCopy(code: string | null): string {
+  if (code === null) {
+    return COMPENSATION_ERROR_FALLBACK;
+  }
+  return COMPENSATION_ERROR_COPY[code] ?? COMPENSATION_ERROR_FALLBACK;
+}
+
+// Read-only by construction: there is no form state, no submitting flag and
+// nothing to save, because no route writes compensation in this build.
+type CompensationPanelState =
+  | { phase: 'idle' }
+  | { phase: 'loading' }
+  | { phase: 'error'; message: string }
+  | { phase: 'ready'; data: CompensationListResponse };
+
 type EmploymentFormProps = {
   mode: 'create' | 'update';
   currentStatus: EmploymentStatus;
@@ -769,6 +822,10 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
     useState<EmploymentFormValues>(EMPTY_EMPLOYMENT_FORM);
   const [employmentSubmitting, setEmploymentSubmitting] = useState(false);
   const [employmentError, setEmploymentError] = useState<string | null>(null);
+  const [compensating, setCompensating] = useState<PeopleListItem | null>(null);
+  const [compensationState, setCompensationState] =
+    useState<CompensationPanelState>({ phase: 'idle' });
+  const [compensationAttempt, setCompensationAttempt] = useState(0);
 
   useEffect(() => {
     // A response is dropped once the search or page has moved on, so a slow
@@ -874,6 +931,45 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
     };
   }, [employing, employmentAttempt]);
 
+  useEffect(() => {
+    // The same rule as the employment history: fetched when this panel opens, not
+    // with the directory, because the response is this member's own scope answer
+    // for this person and one that arrives after the panel moved on is dropped
+    // rather than shown against a different colleague.
+    if (compensating === null) {
+      return;
+    }
+    let stale = false;
+    const person = compensating;
+
+    async function loadHistory() {
+      setCompensationState({ phase: 'loading' });
+      const result = await api.compensations(person.id);
+      if (stale) {
+        return;
+      }
+      if (!result.ok) {
+        // A 401 is handled by the global listener that returns the app to
+        // sign-in, so the panel simply goes with it.
+        if (result.status !== 401) {
+          setCompensationState({
+            phase: 'error',
+            message: compensationErrorCopy(result.code),
+          });
+        } else {
+          setCompensating(null);
+        }
+        return;
+      }
+      setCompensationState({ phase: 'ready', data: result.data });
+    }
+
+    void loadHistory();
+    return () => {
+      stale = true;
+    };
+  }, [compensating, compensationAttempt]);
+
   const data = state.phase === 'ready' ? state.data : null;
   const totalPages =
     data === null ? 1 : Math.max(1, Math.ceil(data.total / data.pageSize));
@@ -893,6 +989,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
   function openCreateForm() {
     closePlacement();
     closeEmployment();
+    closeCompensation();
     setSavedMessage(null);
     setFormError(null);
     setValues(EMPTY_PEOPLE_FORM);
@@ -902,6 +999,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
   function openEditForm(person: PeopleListItem) {
     closePlacement();
     closeEmployment();
+    closeCompensation();
     setSavedMessage(null);
     setFormError(null);
     setValues(formValuesFromPerson(person));
@@ -914,6 +1012,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
   function openPlacement(person: PeopleListItem) {
     closeForm();
     closeEmployment();
+    closeCompensation();
     setSavedMessage(null);
     setPlacementError(null);
     setPlacementValue('');
@@ -950,6 +1049,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
   function openEmployment(person: PeopleListItem) {
     closeForm();
     closePlacement();
+    closeCompensation();
     setSavedMessage(null);
     closeEmploymentForm();
     setEmploymentState({ phase: 'idle' });
@@ -959,6 +1059,27 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
   function retryEmployments() {
     setEmploymentError(null);
     setEmploymentAttempt((current) => current + 1);
+  }
+
+  function closeCompensation() {
+    setCompensating(null);
+    setCompensationState({ phase: 'idle' });
+  }
+
+  // Opening this one needs no write of any kind, and it promises none: the panel
+  // it opens is the stored rows and nothing else, because no route in this build
+  // writes compensation.
+  function openCompensation(person: PeopleListItem) {
+    closeForm();
+    closePlacement();
+    closeEmployment();
+    setSavedMessage(null);
+    setCompensationState({ phase: 'idle' });
+    setCompensating(person);
+  }
+
+  function retryCompensations() {
+    setCompensationAttempt((current) => current + 1);
   }
 
   function openEmploymentCreate() {
@@ -1132,7 +1253,12 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
               className="button button--primary button--small"
               type="button"
               onClick={openCreateForm}
-              disabled={form !== null || placing !== null || employing !== null}
+              disabled={
+                form !== null ||
+                placing !== null ||
+                employing !== null ||
+                compensating !== null
+              }
             >
               Add person
             </button>
@@ -1410,6 +1536,103 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
           </div>
         ) : null}
 
+        {compensating ? (
+          <div
+            className="placement-panel"
+            aria-labelledby="compensation-panel-title"
+          >
+            <div className="employment-panel-head">
+              <h3 id="compensation-panel-title" className="people-form-title">
+                Compensation for {compensating.displayName}
+              </h3>
+              <button
+                className="button button--quiet button--small"
+                type="button"
+                onClick={closeCompensation}
+              >
+                Close
+              </button>
+            </div>
+
+            {compensationState.phase === 'loading' ? (
+              <p className="placement-state">Loading the compensation history…</p>
+            ) : null}
+
+            {compensationState.phase === 'error' ? (
+              <div className="placement-state">
+                {/* The message is this screen's own copy for the code the API
+                    returned, never the server's text, and it is announced in a
+                    polite live region: a failed read is news, not an alarm. */}
+                <p className="form-alert" role="status" aria-live="polite">
+                  {compensationState.message}
+                </p>
+                <button
+                  className="button button--quiet button--small"
+                  type="button"
+                  onClick={retryCompensations}
+                >
+                  Try again
+                </button>
+              </div>
+            ) : null}
+
+            {compensationState.phase === 'ready' ? (
+              <div className="employment-body">
+                {compensationState.data.items.length === 0 ? (
+                  <p className="fine-print placement-empty">
+                    No compensation is recorded for this person yet.
+                  </p>
+                ) : (
+                  <div className="directory-scroll">
+                    <table
+                      className="directory-table"
+                      aria-label={`Compensation history for ${compensating.displayName}`}
+                    >
+                      <thead>
+                        <tr>
+                          <th scope="col">Effective from</th>
+                          <th scope="col">Effective to</th>
+                          <th scope="col">Amount</th>
+                          <th scope="col">Pay frequency</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {compensationState.data.items.map((compensation) => (
+                          <tr key={compensation.id}>
+                            <th scope="row">{compensation.effectiveFrom}</th>
+                            <td>{compensation.effectiveTo ?? '—'}</td>
+                            <td>
+                              {formatCompensationAmount(
+                                compensation.ctcMinor,
+                                compensation.currency,
+                              )}
+                            </td>
+                            <td>
+                              {COMPENSATION_PAY_FREQUENCY_LABELS[
+                                compensation.payFrequency
+                              ]}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                <p className="fine-print compensation-note">
+                  Compensation is read-only in this build. There is no way to add,
+                  change or remove a salary record from this screen or anywhere
+                  else in the product yet, and none of these figures can be
+                  edited. Payroll, payslips and statutory deductions are not
+                  built, so each row is a stored amount in its own currency with
+                  the pay frequency stored beside it - not a monthly or annual
+                  salary worked out from it.
+                </p>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         {state.phase === 'error' ? (
           <div className="directory-state">
             <p className="directory-error" role="alert">
@@ -1452,7 +1675,11 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
                             type="button"
                             aria-label={`Edit ${person.displayName}`}
                             onClick={() => openEditForm(person)}
-                            disabled={placing !== null || employing !== null}
+                            disabled={
+                              placing !== null ||
+                              employing !== null ||
+                              compensating !== null
+                            }
                           >
                             Edit
                           </button>
@@ -1464,6 +1691,7 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
                             disabled={
                               form !== null ||
                               employing !== null ||
+                              compensating !== null ||
                               placing?.id === person.id
                             }
                           >
@@ -1481,11 +1709,31 @@ export function PeopleScreen({ context }: PeopleScreenProps) {
                         disabled={
                           form !== null ||
                           placing !== null ||
+                          compensating !== null ||
                           employing?.id === person.id
                         }
                       >
                         Employment
                       </button>
+                      {/* Salary history is a stricter read than the directory, so
+                          the action is absent rather than disabled when this
+                          member's role has no people.compensation.read. */}
+                      {canReadCompensation(context) ? (
+                        <button
+                          className="button button--quiet button--small"
+                          type="button"
+                          aria-label={`Compensation ${person.displayName}`}
+                          onClick={() => openCompensation(person)}
+                          disabled={
+                            form !== null ||
+                            placing !== null ||
+                            employing !== null ||
+                            compensating?.id === person.id
+                          }
+                        >
+                          Compensation
+                        </button>
+                      ) : null}
                     </td>
                   </tr>
                 ))}

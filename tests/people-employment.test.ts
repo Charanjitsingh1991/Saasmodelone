@@ -2229,6 +2229,9 @@ describe('Employment grants and the directory it sits beside', () => {
     });
 
     expect(grants).toHaveLength(12);
+    // Still twelve table-level privileges: the compensation grant the next slice
+    // added is column-qualified, so it is not in this view and is pinned instead
+    // in tests/people-compensation.test.ts.
     expect(
       grants.filter((row) => row.table_name === 'employment').map((row) => row.privilege_type),
     ).toEqual(['DELETE', 'INSERT', 'SELECT', 'UPDATE']);
@@ -2254,7 +2257,7 @@ describe('Employment grants and the directory it sits beside', () => {
     expect(acl.filter((entry) => entry.startsWith('saas_runtime='))).toHaveLength(1);
   });
 
-  test('adds no migration: the ledger still holds twelve applied versions', async () => {
+  test('adds no migration of its own: the ledger holds thirteen applied versions, newest 0013', async () => {
     const ledger = await withOwner(async (client) => {
       const result = await client.query<{ version: string; status: string }>(
         `select version, status from infra.schema_migration
@@ -2264,9 +2267,13 @@ describe('Employment grants and the directory it sits beside', () => {
       return result.rows;
     });
 
-    expect(ledger).toHaveLength(12);
+    // Employment added no version between 0001 and 0012; the thirteenth,
+    // 0013_compensation_read.sql, belongs to the next slice and changes nothing
+    // here. The ledger is pinned so a fourth history migration cannot arrive
+    // without being named in this suite too.
+    expect(ledger).toHaveLength(13);
     expect(one(ledger).version).toBe('0001_core.sql');
-    expect(ledger[ledger.length - 1]?.version).toBe('0012_people_scope.sql');
+    expect(ledger[ledger.length - 1]?.version).toBe('0013_compensation_read.sql');
   });
 
   test('leaves the directory row and the export byte-identical to before the writes', async () => {

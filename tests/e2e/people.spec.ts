@@ -117,6 +117,24 @@ test.beforeAll(async () => {
       [fixtures.a.tenantId, fixtures.a.legalEntityId],
     );
 
+    // A salary history written owner-side. Nothing in this build can write
+    // compensation through a route, so the rows the read is shown against have to
+    // arrive the way an operator's own SQL would. It hangs off the directory row
+    // the shared fixtures already made, which keeps the person count the journeys
+    // assert exactly as it was.
+    const salaryPerson = fixtures.exportPeople[0];
+    if (!salaryPerson) {
+      throw new Error('The e2e salary person row is missing from the fixtures');
+    }
+    await owner.query(
+      `insert into compensation
+         (tenant_id, person_id, effective_from, effective_to, ctc_minor, currency,
+          pay_frequency)
+       values ($1, $2, '2023-04-01', '2024-03-31', 1000000, 'INR', 'monthly'),
+              ($1, $2, '2024-04-01', null, 1234567, 'INR', 'semi_monthly')`,
+      [fixtures.a.tenantId, salaryPerson.id],
+    );
+
     for (const fixture of [fixtures.a, fixtures.b]) {
       await owner.query(
         `update app_user set password_hash = $2 where id = $1 and status = 'active'`,
@@ -492,6 +510,95 @@ test('signs in, searches, creates and edits the directory, gates People and pers
   await employmentPanel.getByRole('button', { name: 'Close' }).click();
   await expect(employmentPanel).toHaveCount(0);
 
+  // Compensation: the same row-action shape as the employment history, but a
+  // read with no write behind it. The owner's role holds
+  // people.compensation.read, so the action is offered.
+  const compensation = page.locator('[aria-labelledby="compensation-panel-title"]');
+  await directory.getByRole('button', { name: 'Compensation Ada' }).click();
+  await expect(compensation).toHaveCount(1);
+  await expect(
+    compensation.getByRole('heading', { name: 'Compensation for Ada, "Countess"' }),
+  ).toBeVisible();
+
+  const salary = compensation.getByRole('table', {
+    name: 'Compensation history for Ada, "Countess"',
+  });
+  // Newest period first, which is the order the route answers in.
+  await expect(salary.getByRole('rowheader')).toHaveCount(2);
+  await expect(salary.getByRole('rowheader').first()).toHaveText('2024-04-01');
+  await expect(
+    salary.getByRole('cell', { name: '12,345.67 INR', exact: true }),
+  ).toBeVisible();
+  await expect(salary.getByRole('cell', { name: '—', exact: true })).toBeVisible();
+  await expect(
+    salary.getByRole('cell', { name: 'Semi-monthly', exact: true }),
+  ).toBeVisible();
+  await expect(
+    salary.getByRole('cell', { name: '10,000.00 INR', exact: true }),
+  ).toBeVisible();
+  await expect(
+    salary.getByRole('cell', { name: '2024-03-31', exact: true }),
+  ).toBeVisible();
+  await expect(
+    salary.getByRole('cell', { name: 'Monthly', exact: true }),
+  ).toBeVisible();
+
+  // A four-column history inside a panel: it has to fold within its own
+  // scroller rather than widen the page, so the same three viewports the rest of
+  // the journey uses are checked with the panel open, before the width the
+  // remaining steps run at is restored.
+  for (const width of [390, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await noHorizontalOverflow(page);
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+
+  // The panel is read-only in fact as well as in wording: the only control it
+  // offers is the one that closes it, and the note says what the build does not
+  // do rather than implying a salary can be changed.
+  await expect(
+    compensation.getByRole('button', { name: /Add|Save|Edit|New|Remove|Delete/ }),
+  ).toHaveCount(0);
+  await expect(compensation.locator('input, select, textarea')).toHaveCount(0);
+  await expect(compensation.locator('.compensation-note')).toContainText(
+    'Compensation is read-only in this build.',
+  );
+  await expect(compensation.locator('.compensation-note')).toContainText(
+    'not a monthly or annual salary worked out from it',
+  );
+
+  await compensation.getByRole('button', { name: 'Close' }).click();
+  await expect(compensation).toHaveCount(0);
+  // The figure belongs to this panel alone: the directory row never carried it.
+  await expect(directory.getByText('12,345.67')).toHaveCount(0);
+
+  // A person with no history is an empty read, not an error.
+  await directory.getByRole('button', { name: 'Compensation Nadia Kaur' }).click();
+  await expect(
+    compensation.getByText('No compensation is recorded for this person yet.'),
+  ).toBeVisible();
+  await compensation.getByRole('button', { name: 'Close' }).click();
+  await expect(compensation).toHaveCount(0);
+
+  // A failed read is this screen's own copy, announced politely and retryable.
+  // The request never reaches the API, so nothing but the network line can show.
+  await page.route('**/v1/people/*/compensations', (route) => route.abort());
+  await directory.getByRole('button', { name: 'Compensation Ada' }).click();
+  const compensationAlert = compensation.locator('.form-alert');
+  await expect(compensationAlert).toHaveAttribute('aria-live', 'polite');
+  await expect(compensationAlert).toHaveText(
+    'The workspace could not be reached. Check your connection and try again.',
+  );
+  await expect(compensation.getByRole('table')).toHaveCount(0);
+  await page.unroute('**/v1/people/*/compensations');
+
+  await compensation.getByRole('button', { name: 'Try again' }).click();
+  await expect(
+    compensation.getByRole('cell', { name: '12,345.67 INR', exact: true }),
+  ).toBeVisible();
+  await compensation.getByRole('button', { name: 'Close' }).click();
+  await expect(compensation).toHaveCount(0);
+
   const nav = page.getByRole('navigation', { name: 'Modules' });
   await expect(nav.getByRole('link', { name: /People/ })).toHaveAttribute(
     'aria-current',
@@ -591,7 +698,7 @@ test('signs in, searches, creates and edits the directory, gates People and pers
   ).toHaveCount(0);
 });
 
-test('a member whose role reads People sees the employment history with no way to change it', async ({
+test('a member whose role reads People sees the employment history, cannot change it and is not offered the salary read', async ({
   page,
 }) => {
   const reader = requireAccount(readerAccount, 'Read-only');
@@ -617,6 +724,15 @@ test('a member whose role reads People sees the employment history with no way t
   await expect(
     directory.getByRole('button', { name: 'Place Nadia Kaur' }),
   ).toHaveCount(0);
+
+  // Salary history is a stricter read than the directory. This membership holds
+  // people.read and not people.compensation.read, so the row action is absent
+  // from every row rather than present and disabled, and no figure from another
+  // role's panel can be reached on this screen at all.
+  await expect(
+    directory.getByRole('button', { name: /^Compensation/ }),
+  ).toHaveCount(0);
+  await expect(page.getByText('12,345.67')).toHaveCount(0);
 
   // Reading a history is a read, so the row action is here for a reader.
   await directory.getByRole('button', { name: 'Employment Nadia Kaur' }).click();

@@ -2,8 +2,10 @@ import {
   hasPermission,
   MEMBERSHIP_ROLES,
   permissionFor,
+  PERMISSIONS,
   type MembershipRole,
   type ModuleOperation,
+  type Permission,
 } from '@saasmodels/contracts';
 import { Pool, type PoolClient } from 'pg';
 
@@ -27,6 +29,13 @@ export type MemberContext = {
 export type TenantGate = {
   module: string;
   operation: ModuleOperation;
+  // A route may name the permission it actually needs instead of taking the
+  // module's default one for that operation. Compensation is the first case:
+  // the gate stays a `people` read for the entitlement question while asking a
+  // narrower question of the role, so a member holding people.read alone is
+  // refused before any row is looked at. Omit it and the default applies -
+  // permissionFor(module, operation) - which is every existing route.
+  permission?: Permission;
 };
 
 export type TenantTransactionOptions = {
@@ -145,6 +154,25 @@ function assertGate(gate: TenantGate): void {
   ) {
     throw new ModuleAccessDeniedError(gate.module, gate.operation);
   }
+  // An override is checked here rather than left to hasPermission, which would
+  // answer false for a permission string that exists nowhere and report a
+  // made-up permission to the caller. A gate that names a permission outside
+  // PERMISSIONS, or one belonging to another module, is a programming error and
+  // fails closed before the transaction opens.
+  if (gate.permission === undefined) {
+    return;
+  }
+  if (
+    !(PERMISSIONS as readonly string[]).includes(gate.permission) ||
+    !gate.permission.startsWith(`${gate.module}.`)
+  ) {
+    throw new RoleAccessDeniedError(
+      gate.module,
+      gate.operation,
+      gate.permission,
+      'Gate permission is not recognised',
+    );
+  }
 }
 
 function assertMembershipRole(value: string | null | undefined): MembershipRole {
@@ -259,8 +287,11 @@ export async function withMemberTransaction<T>(
       }
 
       // The entitlement check comes first so an unentitled module never
-      // discloses which roles could use it.
-      const permission = permissionFor(gate.module, gate.operation);
+      // discloses which roles could use it. The permission asked of the role is
+      // the gate's own override when it carries one, and the module's default
+      // for this operation otherwise; the entitlement question above stays
+      // exactly the module and operation the route named.
+      const permission = gate.permission ?? permissionFor(gate.module, gate.operation);
       if (!permission || !hasPermission(member.role, permission)) {
         throw new RoleAccessDeniedError(
           gate.module,

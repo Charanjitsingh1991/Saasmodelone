@@ -1,11 +1,11 @@
 import { isIP } from 'node:net';
+import { PERMISSIONS } from '@saasmodels/contracts';
 import { appendAuditEvent } from './audit.js';
 import type { ModuleOperation, RuntimePool } from './tenant.js';
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MODULE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,62}$/;
-const PERMISSION_PATTERN = /^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$/;
 const METHOD_PATTERN = /^[A-Z][A-Z0-9-]{0,31}$/;
 
 export const ACCESS_DENIAL_REASONS = [
@@ -111,9 +111,13 @@ export async function recordAccessDenial(
   if (
     input.permission !== undefined &&
     (typeof input.permission !== 'string' ||
-      !PERMISSION_PATTERN.test(input.permission))
+      !(PERMISSIONS as readonly string[]).includes(input.permission))
   ) {
-    throw new TypeError('permission must be a module.operation string');
+    // The published list, not a shape: a dotted-name regex that assumed
+    // module.operation would silently reject people.compensation.read, and the
+    // rejection lands in a catch that only logs, so the denial row would simply
+    // never appear.
+    throw new TypeError('permission must be a published permission');
   }
 
   const metadata: Record<string, unknown> = { reason: input.reason, method, path };

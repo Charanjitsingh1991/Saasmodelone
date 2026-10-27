@@ -1110,6 +1110,15 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
   margin-top: 18px;
 }
 
+/* The compensation read keeps .placement-panel's card, .placement-state's
+   loading row and .employment-body's spacing, because the People panels are one
+   shape. What it adds is a fine print with no write form above it, so the note
+   needs the same gap on its own. */
+.compensation-note {
+  max-width: 68ch;
+  margin-top: 18px;
+}
+
 .panel-state {
   max-width: 660px;
   padding-top: clamp(30px, 7vw, 80px);

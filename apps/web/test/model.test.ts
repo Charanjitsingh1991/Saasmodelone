@@ -1,10 +1,16 @@
 import { describe, expect, test } from 'vitest';
-import type { ContextModule, ContextResponse } from '@saasmodels/contracts';
+import type {
+  ContextModule,
+  ContextResponse,
+  Permission,
+} from '@saasmodels/contracts';
 import {
   accessLabel,
   availableModuleNames,
+  canReadCompensation,
   canReadPeople,
   findModule,
+  formatCompensationAmount,
   navigationModules,
   orderModules,
   roleLabel,
@@ -19,12 +25,22 @@ function module(
   return { code, name: code.replace(/^./, (letter) => letter.toUpperCase()), sortOrder, canRead, canWrite };
 }
 
-function context(modules: ContextModule[]): ContextResponse {
+// The owner array /v1/context answers with today, so this fixture cannot drift
+// into claiming a screen may show something the server would refuse.
+const OWNER_PERMISSIONS: Permission[] = [
+  'people.read',
+  'people.write',
+  'people.compensation.read',
+  'work.read',
+  'work.write',
+];
+
+function context(modules: ContextModule[], permissions = OWNER_PERMISSIONS): ContextResponse {
   return {
     userId: 'user-1',
     tenantId: 'tenant-1',
     role: 'owner',
-    permissions: ['people.read', 'people.write'],
+    permissions,
     switchAccess: true,
     modules,
   };
@@ -89,5 +105,29 @@ describe('module presentation', () => {
       ),
     ).toEqual(['People', 'Work']);
     expect(findModule(context([module('work', 30)]), 'people')).toBeUndefined();
+  });
+
+  test('offers salary history only to a context holding its own permission', () => {
+    expect(canReadCompensation(context([module('people', 10)]))).toBe(true);
+    // The directory read and the module's own read flag are not the pay
+    // permission: a manager sees colleagues and their employment, not their cost.
+    expect(
+      canReadCompensation(
+        context([module('people', 10)], ['people.read', 'work.read', 'work.write']),
+      ),
+    ).toBe(false);
+    expect(canReadCompensation(context([module('people', 10)], []))).toBe(false);
+  });
+
+  test('renders a stored amount as its own minor units and currency, unchanged', () => {
+    // Two fractional digits because the table records no decimal exponent, and
+    // nothing else: no annualising, no prorating, no period label.
+    expect(formatCompensationAmount(1234567, 'INR')).toBe('12,345.67 INR');
+    expect(formatCompensationAmount(0, 'USD')).toBe('0.00 USD');
+    expect(formatCompensationAmount(5, 'USD')).toBe('0.05 USD');
+    expect(formatCompensationAmount(100, 'EUR')).toBe('1.00 EUR');
+    expect(formatCompensationAmount(1234567890123, 'ZZZ')).toBe(
+      '12,345,678,901.23 ZZZ',
+    );
   });
 });

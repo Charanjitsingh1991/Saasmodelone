@@ -85,7 +85,7 @@ describe('schema inventory', () => {
     }
   });
 
-  test('holds exactly one permissive isolation policy per RLS table inside the reviewed 274-policy inventory', async () => {
+  test('holds exactly one permissive isolation policy per RLS table inside the reviewed 275-policy inventory', async () => {
     const client = await ownerClient();
     try {
       const totals = await client.query<{ permissive: string; restrictive: string }>(`
@@ -96,7 +96,7 @@ describe('schema inventory', () => {
           join pg_namespace n on n.oid = c.relnamespace
          where n.nspname = 'public'
       `);
-      expect(totals.rows).toEqual([{ permissive: '66', restrictive: '208' }]);
+      expect(totals.rows).toEqual([{ permissive: '66', restrictive: '209' }]);
 
       const perTable = await client.query<{ rls_tables: string; with_isolation: string }>(`
         select count(*) filter (where c.relrowsecurity)::text as rls_tables,
@@ -127,14 +127,18 @@ describe('schema inventory', () => {
         select c.relname as table_name, p.polname
           from pg_policy p
           join pg_class c on c.oid = p.polrelid
-         where c.relname in ('person', 'employment')
+         where c.relname in ('compensation', 'employment', 'person')
            and p.polname like 'scope_%'
          order by c.relname, p.polname
       `);
-      // 0012 adds the same four names to both tables. They are restrictive, so
-      // they AND with tenant_isolation and the module_people_* set instead of
-      // replacing either; tests/scope.test.ts asserts the expressions.
+      // 0012 adds the same four names to person and employment. 0013 adds the one
+      // name compensation has today - a read - because no route writes salary yet
+      // and the runtime holds no write privilege on the table. All of them are
+      // restrictive, so they AND with tenant_isolation and the module_people_*
+      // set instead of replacing either; tests/scope.test.ts asserts the
+      // expressions and tests/people-compensation.test.ts the grant beside them.
       expect(scopePolicies.rows.map((row) => `${row.table_name}.${row.polname}`)).toEqual([
+        'compensation.scope_read',
         'employment.scope_delete',
         'employment.scope_insert',
         'employment.scope_read',
@@ -264,6 +268,9 @@ describe('schema inventory', () => {
         { table_name: 'project', privilege_type: 'UPDATE' },
       ];
       expect(grants.rows).toEqual(expected);
+      // This is the table-level inventory, so it stays at twelve: compensation's
+      // 0013 grant is column-qualified and belongs to column_privileges, where
+      // tests/people-compensation.test.ts pins its exact seven columns.
 
       const tables = await client.query<{ table_name: string; rls: boolean }>(`
         select t.table_name, c.relrowsecurity as rls

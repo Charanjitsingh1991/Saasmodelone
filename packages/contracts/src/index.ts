@@ -2,6 +2,9 @@ export const PRODUCT_NAME = 'SaaSModels One';
 
 export type { ContextModule, ContextResponse, SessionResponse } from './context.js';
 export type {
+  CompensationItem,
+  CompensationListResponse,
+  CompensationPayFrequency,
   EmploymentCreateInput,
   EmploymentItem,
   EmploymentListResponse,
@@ -18,6 +21,7 @@ export type {
   PeopleUpdateInput,
 } from './people.js';
 export {
+  COMPENSATION_PAY_FREQUENCIES,
   EMPLOYMENT_NOTICE_DAYS_MAX,
   EMPLOYMENT_STATUSES,
   EMPLOYMENT_TYPES,

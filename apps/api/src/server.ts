@@ -17,6 +17,9 @@ import {
   PERSON_WORK_EMAIL_MAX_LENGTH,
   type ContextModule,
   type ContextResponse,
+  type CompensationItem,
+  type CompensationListResponse,
+  type CompensationPayFrequency,
   type EmploymentItem,
   type EmploymentListResponse,
   type EmploymentStatus,
@@ -781,6 +784,60 @@ function employmentItemFromRow(row: EmploymentRow): EmploymentItem {
     probationEndDate: row.probation_end_date,
     noticeDays: row.notice_days,
     status: row.status,
+  };
+}
+
+// One shared read behind every compensation response. There is only one - the
+// list - but it is spelled out as fragments the way the employment and identity
+// reads are, so the columns the runtime is granted are visible in one place.
+//
+// The dates are formatted in SQL because the wire shape is one calendar day, not
+// a timestamp a session timezone can shift. ctc_minor is read as text: the
+// column is a bigint and only the database can promise its full range, so the
+// conversion to a JavaScript number happens in compensationItemFromRow, where a
+// value outside Number.MAX_SAFE_INTEGER is refused instead of rounded. The
+// amount is never converted, annualised or prorated here or anywhere else in
+// this build - see suite/docs/adr/0011-compensation-read.md.
+const COMPENSATION_SELECT = `select c.id,
+                    c.person_id,
+                    to_char(c.effective_from, 'YYYY-MM-DD') as effective_from,
+                    to_char(c.effective_to, 'YYYY-MM-DD') as effective_to,
+                    c.ctc_minor::text as ctc_minor,
+                    c.currency,
+                    c.pay_frequency`;
+
+const COMPENSATION_FROM = 'from compensation c';
+
+// Newest period first, with the id as the tie-breaker so two rows sharing an
+// effective_from answer in a stable order.
+const COMPENSATION_ORDER = 'order by c.effective_from desc, c.id';
+
+type CompensationRow = {
+  id: string;
+  person_id: string;
+  effective_from: string;
+  effective_to: string | null;
+  ctc_minor: string;
+  currency: string;
+  pay_frequency: CompensationPayFrequency;
+};
+
+function compensationItemFromRow(row: CompensationRow): CompensationItem {
+  const ctcMinor = Number.parseInt(row.ctc_minor, 10);
+  // A bigint the runtime can read but a JavaScript number cannot hold exactly.
+  // Answering 500 is honest; answering a rounded figure on a money column is
+  // not, and no caller downstream can tell the difference.
+  if (!Number.isSafeInteger(ctcMinor)) {
+    throw new ApiError(500, 'INTERNAL_ERROR');
+  }
+  return {
+    id: row.id,
+    personId: row.person_id,
+    effectiveFrom: row.effective_from,
+    effectiveTo: row.effective_to,
+    ctcMinor,
+    currency: row.currency,
+    payFrequency: row.pay_frequency,
   };
 }
 
@@ -2003,6 +2060,73 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
           });
 
           return employmentItemFromRow(row);
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  app.get('/v1/people/:id/compensations', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+
+    const personId = (request.params as { id?: unknown }).id;
+
+    try {
+      // Compensation is salary history, so it has a permission of its own rather
+      // than riding on people.read: the gate names people.compensation.read and
+      // the assertion below it runs inside that gate. Entitlement is still
+      // checked before the role, so an unentitled tenant answers
+      // MODULE_NOT_ENTITLED for this path exactly as it does for every other.
+      // No scope predicate is restated here; compensation's tenant_isolation and
+      // the restrictive scope_read policy in 0013_compensation_read.sql narrow
+      // the rows, and the member transaction is what sets the app.user_id that
+      // policy keys on.
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: {
+            module: 'people',
+            operation: 'read',
+            permission: 'people.compensation.read',
+          },
+        },
+        async (client) => {
+          // Inside the gated transaction, after entitlement and role, so a denied
+          // caller is denied the same way whatever the id looks like.
+          if (typeof personId !== 'string' || !UUID_TEXT_PATTERN.test(personId)) {
+            throw new ApiError(404, 'PERSON_NOT_FOUND');
+          }
+
+          // The person read is the visibility test, answered with the directory's
+          // own miss: unknown, malformed, soft-deleted, another tenant or out of
+          // scope are one PERSON_NOT_FOUND. A compensation route therefore cannot
+          // be used to probe for people a member may not list.
+          const personRows = await client.query<PeopleListRow>(
+            `${DIRECTORY_SELECT}
+              ${DIRECTORY_FROM}
+              where p.id = $1 and p.deleted_at is null`,
+            [personId],
+          );
+          if (!personRows.rows[0]) {
+            throw new ApiError(404, 'PERSON_NOT_FOUND');
+          }
+
+          const rows = await client.query<CompensationRow>(
+            `${COMPENSATION_SELECT}
+              ${COMPENSATION_FROM}
+              where c.person_id = $1
+              ${COMPENSATION_ORDER}`,
+            [personId],
+          );
+          const items = rows.rows.map(compensationItemFromRow);
+          const body: CompensationListResponse = { items, total: items.length };
+          return body;
         },
       );
     } catch (error) {

@@ -165,3 +165,49 @@ export type EmploymentUpdateInput = {
   noticeDays?: number | null;
   status?: EmploymentStatus;
 };
+
+// The pay frequencies the compensation table's CHECK allows, restated so a
+// screen can label a stored value without inventing a vocabulary of its own.
+export const COMPENSATION_PAY_FREQUENCIES = [
+  'monthly',
+  'semi_monthly',
+  'biweekly',
+  'weekly',
+] as const;
+
+export type CompensationPayFrequency =
+  (typeof COMPENSATION_PAY_FREQUENCIES)[number];
+
+// One stored compensation row, read-only. There is deliberately no create or
+// update input in this file: no route writes compensation yet.
+//
+// ctcMinor is the value of the ctc_minor column exactly as stored, in minor
+// units of `currency`. The schema does not say whether it is an annual
+// cost-to-company or a per-period amount, and pay_frequency is a separate
+// stored field rather than a rule for converting one into the other. Nothing in
+// this contract, its route or its screen computes, annualises or prorates it,
+// and nothing labels it "monthly" or "annual". Payroll defines that relationship
+// when payroll is built - see suite/docs/adr/0011-compensation-read.md.
+//
+// The column is a bigint. The route reads it as text and converts it only when
+// the value is inside Number.MAX_SAFE_INTEGER, so a figure that a JavaScript
+// number could silently round is refused rather than approximated.
+export type CompensationItem = {
+  id: string;
+  personId: string;
+  // Dates are 'YYYY-MM-DD' strings, exactly as the employment rows are, so no
+  // timezone can shift a stored day on the wire.
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  ctcMinor: number;
+  currency: string;
+  payFrequency: CompensationPayFrequency;
+};
+
+// Every row this member may see for this person, newest first. No paging, for
+// the same reason the employment history has none, and no total beyond the
+// length of `items`.
+export type CompensationListResponse = {
+  items: CompensationItem[];
+  total: number;
+};

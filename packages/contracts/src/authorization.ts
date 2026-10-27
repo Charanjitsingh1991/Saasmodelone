@@ -14,9 +14,14 @@ export const MODULE_OPERATIONS = ['read', 'write'] as const;
 
 export type ModuleOperation = (typeof MODULE_OPERATIONS)[number];
 
+// Compensation is its own permission rather than a facet of people.read, because
+// the directory read and a salary read are different disclosures: a member who
+// may list colleagues is not thereby entitled to see what they cost. It is
+// read-only here by design - people.compensation.write arrives with the write slice.
 export const PERMISSIONS = [
   'people.read',
   'people.write',
+  'people.compensation.read',
   'work.read',
   'work.write',
 ] as const;
@@ -25,11 +30,30 @@ export type Permission = (typeof PERMISSIONS)[number];
 
 // M0 covers the two gated modules only. Employee is intentionally empty:
 // self-scope needs a person-to-user link and is deferred to M1.
+//
+// Compensation reads belong to the four roles that maintain or pay people. An
+// auditor holds people.read and deliberately does not hold this permission: an
+// audit role is built for aggregates and reconciliation, not for reading named
+// colleagues' salaries, and nothing about the role's capability makes the rows
+// necessary. That exclusion is a policy choice and is recorded as a residual in
+// the threat model with a review question attached.
 const ROLE_PERMISSIONS = {
-  owner: ['people.read', 'people.write', 'work.read', 'work.write'],
-  admin: ['people.read', 'people.write', 'work.read', 'work.write'],
-  hr: ['people.read', 'people.write'],
-  finance: ['people.read', 'work.read'],
+  owner: [
+    'people.read',
+    'people.write',
+    'people.compensation.read',
+    'work.read',
+    'work.write',
+  ],
+  admin: [
+    'people.read',
+    'people.write',
+    'people.compensation.read',
+    'work.read',
+    'work.write',
+  ],
+  hr: ['people.read', 'people.write', 'people.compensation.read'],
+  finance: ['people.read', 'people.compensation.read', 'work.read'],
   manager: ['people.read', 'work.read', 'work.write'],
   employee: [],
   auditor: ['people.read', 'work.read'],

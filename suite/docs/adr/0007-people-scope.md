@@ -255,3 +255,31 @@ were re-derived from the live database to confirm that" describes the
 scope-administration and directory-read slices, and it stands for them. This slice is
 the one that moves a privilege figure rather than only adding a route, so read that
 bullet together with the paragraph above rather than as a claim about the write path.
+
+## Amendment — T22 adds the compensation read path (M1 slice 7)
+
+`0013_compensation_read.sql` is the first migration added since 0012 and the only one
+that touches this ADR's layer. It adds exactly one policy —
+`create policy scope_read on public.compensation as restrictive for select using
+(app.person_visible(person_id));` — with no new function, no change to a helper already
+granted, and no table-level privilege, so the schema figures move for the first time
+since the scope slice: 13 migrations, 275 policies (66 permissive, 209 restrictive), and
+nine `scope_*` policies across three tables instead of eight across two. `compensation`
+joins `employment` as a table the runtime reads only through column privileges — seven
+`SELECT` columns, `has_table_privilege` false for all four commands, no DML of any kind.
+
+The reason the policy and the grant arrived in the same slice is this ADR's decision
+written as a test: `tests/scope.test.ts` discovers every public `person_id` table the
+runtime can reach, through a table-level or any column-level `SELECT`, and refuses one
+that carries no restrictive read policy. Applying the 0013 grant alone fails that suite
+with `compensation` named in the uncovered list, which is the enforcement this ADR asks
+for — a table becomes readable at the same moment it becomes bounded, never one slice
+later.
+
+What the slice does not change is the part reviewers should keep. The resolution order in
+`app.person_visible` is untouched, so an unplaced person, an org-unit subtree and an
+employee's own linked row are decided by the same function that decides the directory;
+the fail-open system-transaction residual stands exactly as pinned; and `employee` is
+still refused, here by a permission check that runs before any policy, so the self-scope
+this ADR built continues to have no product path for the person it belongs to. The route
+adds no scope predicate of its own — see [ADR 0011](0011-compensation-read.md) decision 4.

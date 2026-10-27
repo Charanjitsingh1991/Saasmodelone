@@ -73,6 +73,20 @@ grant select (
   id, name, legal_entity_id, deleted_at
 ) on table public.org_unit to saas_runtime;
 
+-- Compensation history. Column-only SELECT on exactly the seven columns the
+-- read route names; no table-level grant, no INSERT, UPDATE or DELETE, and no
+-- tenant_id. The structure jsonb stays ungranted because it is where an
+-- unreviewed pay breakdown would live, and the source, import and timestamp
+-- columns stay owner-only for the same reason they do on person. Queries reach
+-- these rows by the person they hang off and rely on the composite
+-- (tenant_id, person_id) foreign key, the tenant_isolation policy from 0002 and
+-- the restrictive scope_read policy from 0013_compensation_read.sql; the route
+-- never filters on tenant_id itself. Compensation administration is not built,
+-- so the runtime role has no write path to this table.
+grant select (
+  id, person_id, effective_from, effective_to, ctc_minor, currency, pay_frequency
+) on table public.compensation to saas_runtime;
+
 -- Append-only audit writer. No SELECT, UPDATE or DELETE is granted.
 grant insert on table public.audit_event to saas_runtime;
 

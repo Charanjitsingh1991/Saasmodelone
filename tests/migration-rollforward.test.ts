@@ -311,10 +311,11 @@ afterAll(async () => {
 
 describe('migration roll-forward over populated data', () => {
   test('applies only the newest file while the earlier ones are skipped by checksum', () => {
-    expect(allFiles).toHaveLength(12);
-    expect(newestFile).toBe('0012_people_scope.sql');
-    expect(previousFiles).toHaveLength(11);
+    expect(allFiles).toHaveLength(13);
+    expect(newestFile).toBe('0013_compensation_read.sql');
+    expect(previousFiles).toHaveLength(12);
     expect(previousFiles).toContain('0011_outbox.sql');
+    expect(previousFiles).toContain('0012_people_scope.sql');
     expect(upgraded().applied).toEqual([newestFile]);
     expect(upgraded().skipped).toEqual(previousFiles);
   });
@@ -586,7 +587,7 @@ describe('migration roll-forward over populated data', () => {
     expect(await read(deterministicUuid('rollforward_absent_user'))).toBe(0);
   });
 
-  test('installs the scope helpers and the eight restrictive policies on the upgraded database', async () => {
+  test('installs the scope helpers, the eight 0012 policies and the one 0013 read policy on the upgraded database', async () => {
     const client = await ownerClient();
     try {
       const functions = await client.query<{ proname: string; owner: string; config: string[] }>(
@@ -626,6 +627,37 @@ describe('migration roll-forward over populated data', () => {
       );
       expect(policies.rows).toHaveLength(8);
       expect(policies.rows.every((row) => row.permissive === false)).toBe(true);
+
+      // 0013_compensation_read.sql is the file this roll-forward actually applies,
+      // so the same proof covers it: over a database that already holds rows, the
+      // one compensation scope policy lands restrictive, for select only, naming
+      // the same read oracle the directory and the employment history use. There
+      // is no insert, update or delete policy beside it because no route writes
+      // compensation yet.
+      const compensation = await client.query<{
+        table_name: string;
+        polname: string;
+        command: string;
+        permissive: boolean;
+        using_clause: string | null;
+      }>(
+        `select c.relname as table_name, p.polname, p.polcmd::text as command,
+                p.polpermissive as permissive,
+                pg_get_expr(p.polqual, p.polrelid) as using_clause
+           from pg_policy p
+           join pg_class c on c.oid = p.polrelid
+          where c.relname = 'compensation' and p.polname like 'scope_%'
+          order by p.polname`,
+      );
+      expect(compensation.rows).toEqual([
+        {
+          table_name: 'compensation',
+          polname: 'scope_read',
+          command: 'r',
+          permissive: false,
+          using_clause: 'app.person_visible(person_id)',
+        },
+      ]);
 
       // The pre-existing person read still works for the owner path, which is
       // what the snapshot above proved: nothing was dropped or weakened.

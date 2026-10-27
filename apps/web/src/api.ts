@@ -1,5 +1,6 @@
 import type {
   ContextResponse,
+  CompensationListResponse,
   EmploymentCreateInput,
   EmploymentItem,
   EmploymentListResponse,
@@ -177,6 +178,16 @@ export const api = {
         headers: writeHeaders(),
         body: JSON.stringify(input),
       },
+    ),
+
+  // One person's compensation history. A GET, so no CSRF header. This is the
+  // only compensation call the client has: no route writes salary yet, so the
+  // screen can offer no add, edit or save. The server gates it on
+  // people.compensation.read - a stricter test than the directory's people.read -
+  // and narrows every row by this member's own scope.
+  compensations: (id: string) =>
+    request<CompensationListResponse>(
+      `/v1/people/${encodeURIComponent(id)}/compensations`,
     ),
 
   login: (input: LoginInput) =>
