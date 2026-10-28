@@ -275,7 +275,9 @@ describe('schema inventory', () => {
       expect(grants.rows).toEqual(expected);
       // This is the table-level inventory, so it stays at twelve: compensation's
       // grants are column-qualified and belong to column_privileges, where the
-      // test below pins the exact read and write columns.
+      // test below pins the exact read and write columns. The three grants added
+      // for the Work, Money and Content reads are column-qualified too, so they
+      // are absent here and are pinned in the test below.
 
       const tables = await client.query<{ table_name: string; rls: boolean }>(`
         select t.table_name, c.relrowsecurity as rls
@@ -301,6 +303,92 @@ describe('schema inventory', () => {
           expect(tenantTables.get(table)).toBe(true);
         }
       }
+    } finally {
+      await client.end();
+    }
+  });
+
+  // The three module read surfaces. Each grant is column-qualified and read-only:
+  // a column grant is not a table privilege, so the runtime cannot select a
+  // column the route does not name, and there is no INSERT, UPDATE or DELETE on
+  // client, content_item or invoice. public.project deliberately keeps its M0
+  // table-level SELECT, INSERT, UPDATE and DELETE grant - the M0 module denial
+  // proof depends on it - and there is still no product write route and no
+  // write screen in any of the three modules.
+  test('grants the runtime column-only SELECT on the three module read tables', async () => {
+    const client = await ownerClient();
+    try {
+      const columns = await client.query<{
+        table_name: string;
+        column_name: string;
+        privilege_type: string;
+      }>(`
+        select table_name, column_name, privilege_type
+          from information_schema.column_privileges
+         where grantee = 'saas_runtime'
+           and table_schema = 'public'
+           and table_name in ('client', 'content_item', 'invoice')
+         order by table_name, column_name, privilege_type
+      `);
+      expect(columns.rows).toEqual([
+        { table_name: 'client', column_name: 'code', privilege_type: 'SELECT' },
+        { table_name: 'client', column_name: 'deleted_at', privilege_type: 'SELECT' },
+        { table_name: 'client', column_name: 'id', privilege_type: 'SELECT' },
+        { table_name: 'client', column_name: 'name', privilege_type: 'SELECT' },
+        { table_name: 'client', column_name: 'status', privilege_type: 'SELECT' },
+        { table_name: 'content_item', column_name: 'deleted_at', privilege_type: 'SELECT' },
+        { table_name: 'content_item', column_name: 'id', privilege_type: 'SELECT' },
+        { table_name: 'content_item', column_name: 'kind', privilege_type: 'SELECT' },
+        { table_name: 'content_item', column_name: 'locale', privilege_type: 'SELECT' },
+        { table_name: 'content_item', column_name: 'published_at', privilege_type: 'SELECT' },
+        { table_name: 'content_item', column_name: 'slug', privilege_type: 'SELECT' },
+        { table_name: 'content_item', column_name: 'status', privilege_type: 'SELECT' },
+        { table_name: 'content_item', column_name: 'title', privilege_type: 'SELECT' },
+        { table_name: 'content_item', column_name: 'updated_at', privilege_type: 'SELECT' },
+        { table_name: 'invoice', column_name: 'amount_paid_minor', privilege_type: 'SELECT' },
+        { table_name: 'invoice', column_name: 'client_id', privilege_type: 'SELECT' },
+        { table_name: 'invoice', column_name: 'currency', privilege_type: 'SELECT' },
+        { table_name: 'invoice', column_name: 'due_date', privilege_type: 'SELECT' },
+        { table_name: 'invoice', column_name: 'id', privilege_type: 'SELECT' },
+        { table_name: 'invoice', column_name: 'issue_date', privilege_type: 'SELECT' },
+        { table_name: 'invoice', column_name: 'number', privilege_type: 'SELECT' },
+        { table_name: 'invoice', column_name: 'status', privilege_type: 'SELECT' },
+        { table_name: 'invoice', column_name: 'subtotal_minor', privilege_type: 'SELECT' },
+        { table_name: 'invoice', column_name: 'tax_minor', privilege_type: 'SELECT' },
+        { table_name: 'invoice', column_name: 'total_minor', privilege_type: 'SELECT' },
+      ]);
+
+      // A column grant is not a table privilege. None of the three tables can be
+      // selected as a whole, and none of them can be written at all.
+      const privileges = await client.query<{
+        table_name: string;
+        privilege: string;
+        allowed: boolean;
+      }>(`
+        select t as table_name, p as privilege,
+               has_table_privilege('saas_runtime', 'public.' || t, p) as allowed
+          from unnest(array['client', 'content_item', 'invoice']) t
+         cross join unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) p
+         order by 1, 2
+      `);
+      expect(privileges.rows.every((row) => !row.allowed)).toBe(true);
+
+      // project keeps its table-level grant deliberately. The M0 module denial
+      // proof in tests/module-rls.test.ts must fail on the restrictive RLS
+      // policy, not on a missing table privilege, so narrowing this grant is
+      // deferred to the Work write slice.
+      const project = await client.query<{ privilege: string; allowed: boolean }>(`
+        select p as privilege,
+               has_table_privilege('saas_runtime', 'public.project', p) as allowed
+          from unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) p
+         order by 1
+      `);
+      expect(project.rows).toEqual([
+        { privilege: 'DELETE', allowed: true },
+        { privilege: 'INSERT', allowed: true },
+        { privilege: 'SELECT', allowed: true },
+        { privilege: 'UPDATE', allowed: true },
+      ]);
     } finally {
       await client.end();
     }

@@ -44,6 +44,7 @@ import {
   orderModules,
   roleLabel,
 } from '../lib/model';
+import { moduleScreenPath } from '../lib/router';
 
 type LinkHandler = (path: string) => void;
 
@@ -80,32 +81,39 @@ export function HomeScreen({ context, onNavigate }: HomeScreenProps) {
           </p>
         ) : (
           <ul className="module-list">
-            {modules.map((module) => (
-              <li key={module.code}>
-                <div>
-                  <p className="module-name">{module.name}</p>
-                  <p className="module-note">
-                    {module.code === 'people'
-                      ? 'The shared directory for this workspace.'
-                      : 'Enabled for this workspace. Its interface arrives in a later milestone.'}
-                  </p>
-                </div>
-                {module.code === 'people' ? (
-                  <a
-                    className="text-link"
-                    href="/app/people"
-                    onClick={(event) => {
-                      event.preventDefault();
-                      onNavigate('/app/people');
-                    }}
-                  >
-                    Open People
-                  </a>
-                ) : (
-                  <span className="section-count">{accessLabel(module)}</span>
-                )}
-              </li>
-            ))}
+            {modules.map((module) => {
+              // A module with a screen is opened from here; the same map the
+              // navigation and the landing path read decides which is which.
+              const path = moduleScreenPath(module.code);
+              return (
+                <li key={module.code}>
+                  <div>
+                    <p className="module-name">{module.name}</p>
+                    <p className="module-note">
+                      {module.code === 'people'
+                        ? 'The shared directory for this workspace.'
+                        : path
+                          ? 'A screen for this module is available in this workspace.'
+                          : 'Enabled for this workspace.'}
+                    </p>
+                  </div>
+                  {path ? (
+                    <a
+                      className="text-link"
+                      href={path}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        onNavigate(path);
+                      }}
+                    >
+                      Open {module.name}
+                    </a>
+                  ) : (
+                    <span className="section-count">{accessLabel(module)}</span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>

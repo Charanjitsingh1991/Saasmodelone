@@ -1166,13 +1166,15 @@ describe('Compensation read inventory', () => {
       'people.compensation.read',
       'people.compensation.write',
       'work.read',
-      'work.write',
+      'money.read',
+      'content.read',
     ]);
     // No module operation answers with the compensation permission: only a gate
     // that names it explicitly can ask for it.
     expect(permissionFor('people', 'read')).toBe('people.read');
     expect(permissionFor('people', 'write')).toBe('people.write');
     expect(permissionFor('work', 'read')).toBe('work.read');
-    expect(permissionFor('work', 'write')).toBe('work.write');
+    // work.write was withdrawn on 27 October 2026, so no gate can ask for it.
+    expect(permissionFor('work', 'write')).toBeNull();
   });
 });

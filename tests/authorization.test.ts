@@ -12,14 +12,16 @@ import {
 // In PERMISSIONS order, which is the order /v1/context answers in. Salary
 // history comes after both People directory permissions because it is a third
 // question the People module asks, not a variant of either, and its write half
-// sits beside the read it belongs to.
+// sits beside the read it belongs to. The three module reads follow, one per
+// module that has a shipped read surface.
 const ALL_PERMISSIONS = [
   'people.read',
   'people.write',
   'people.compensation.read',
   'people.compensation.write',
   'work.read',
-  'work.write',
+  'money.read',
+  'content.read',
 ];
 
 const COMPENSATION_READ = 'people.compensation.read';
@@ -29,8 +31,14 @@ const ROLE_MATRIX: Record<MembershipRole, string[]> = {
   owner: ALL_PERMISSIONS,
   admin: ALL_PERMISSIONS,
   hr: ['people.read', 'people.write', COMPENSATION_READ, COMPENSATION_WRITE],
-  finance: ['people.read', COMPENSATION_READ, COMPENSATION_WRITE, 'work.read'],
-  manager: ['people.read', 'work.read', 'work.write'],
+  finance: [
+    'people.read',
+    COMPENSATION_READ,
+    COMPENSATION_WRITE,
+    'work.read',
+    'money.read',
+  ],
+  manager: ['people.read', 'work.read'],
   employee: [],
   auditor: ['people.read', 'work.read'],
 };
@@ -49,7 +57,7 @@ describe('authorization policy', () => {
     expect(new Set(MEMBERSHIP_ROLES).size).toBe(7);
   });
 
-  test('publishes the two module operations and the six published permissions', () => {
+  test('publishes the two module operations and the seven published permissions', () => {
     expect(MODULE_OPERATIONS).toEqual(['read', 'write']);
     expect(PERMISSIONS).toEqual(ALL_PERMISSIONS);
     expect(new Set(PERMISSIONS).size).toBe(PERMISSIONS.length);
@@ -130,7 +138,7 @@ describe('authorization policy', () => {
 
   test('hasPermission allows only a policy grant and fails closed', () => {
     expect(hasPermission('owner', 'people.write')).toBe(true);
-    expect(hasPermission('manager', 'work.write')).toBe(true);
+    expect(hasPermission('manager', 'work.read')).toBe(true);
     expect(hasPermission('auditor', 'work.read')).toBe(true);
     expect(hasPermission('auditor', 'work.write')).toBe(false);
     expect(hasPermission('finance', 'people.write')).toBe(false);
@@ -139,11 +147,58 @@ describe('authorization policy', () => {
     expect(permissionsForRole('superuser')).toEqual([]);
   });
 
+  test('withdraws work.write and publishes no write for the three new modules', () => {
+    // work.write was withdrawn on 27 October 2026. It was the only published
+    // permission no route asked for, and while it stayed published /v1/context
+    // answered canWrite = true for Work: a capability the product cannot
+    // perform. permissionFor derives from PERMISSIONS, so the withdrawal is
+    // visible in the context answer without any change to the route that asks.
+    expect(PERMISSIONS).not.toContain('work.write');
+    expect(permissionFor('work', 'write')).toBeNull();
+    expect(hasPermission('manager', 'work.write')).toBe(false);
+    expect(hasPermission('owner', 'work.write')).toBe(false);
+    expect(hasPermission('admin', 'work.write')).toBe(false);
+
+    // No write surface ships in Work, Money or Content, so none of them
+    // publishes a write permission either.
+    expect(permissionFor('money', 'write')).toBeNull();
+    expect(permissionFor('content', 'write')).toBeNull();
+  });
+
+  test('gives the three module reads to the roles that need them', () => {
+    // Finance reads money because invoices are what it reconciles. Manager and
+    // auditor read work because projects are what they are staffed and reviewed
+    // against. The auditor exclusion from money.read and content.read is an
+    // accepted residual recorded in the threat model, with a review question
+    // attached, and the map is a deliberately minimal first cut.
+    for (const role of ['owner', 'admin', 'finance'] as const) {
+      expect(hasPermission(role, 'money.read')).toBe(true);
+    }
+    for (const role of ['hr', 'manager', 'employee', 'auditor'] as const) {
+      expect(hasPermission(role, 'money.read')).toBe(false);
+    }
+
+    for (const role of ['owner', 'admin'] as const) {
+      expect(hasPermission(role, 'content.read')).toBe(true);
+    }
+    for (const role of ['hr', 'finance', 'manager', 'employee', 'auditor'] as const) {
+      expect(hasPermission(role, 'content.read')).toBe(false);
+    }
+
+    for (const role of ['owner', 'admin', 'finance', 'manager', 'auditor'] as const) {
+      expect(hasPermission(role, 'work.read')).toBe(true);
+    }
+    for (const role of ['hr', 'employee'] as const) {
+      expect(hasPermission(role, 'work.read')).toBe(false);
+    }
+  });
+
   test('permissionFor maps only known module and operation pairs', () => {
     expect(permissionFor('people', 'read')).toBe('people.read');
     expect(permissionFor('people', 'write')).toBe('people.write');
     expect(permissionFor('work', 'read')).toBe('work.read');
-    expect(permissionFor('work', 'write')).toBe('work.write');
+    expect(permissionFor('money', 'read')).toBe('money.read');
+    expect(permissionFor('content', 'read')).toBe('content.read');
     expect(permissionFor('payroll', 'read')).toBeNull();
     expect(permissionFor('people', 'delete')).toBeNull();
   });

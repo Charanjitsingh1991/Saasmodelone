@@ -407,8 +407,10 @@ export async function createAccessFixtures(
     '2024-01-01',
     '2024-02-01',
   );
-  // Work is catalog status 'planned', so only an internal tenant may hold it,
-  // and its entitlement must carry an internal source.
+  // Work is catalog status 'preview', so a normal tenant may hold it on a
+  // contract entitlement. This fixture still grants it with an internal source
+  // on an internal tenant, which keeps the internal-tenant branch of the read
+  // gate covered.
   const b = await createTenancyFixture(
     client,
     jurisdictionId,

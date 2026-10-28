@@ -1,6 +1,25 @@
 -- 0001_modules.sql
 -- Initial module catalog. Run once after migrations, then change status
 -- through the administrative path; this file is idempotent.
+--
+-- Work, Money and Content moved from 'planned' to 'preview' on 27 October
+-- 2026, by the owner's decision to build all five modules rather than one at a
+-- time (suite/docs/adr/0013-work-money-content-read.md). 'preview' means the
+-- module is publicly licensable and pre-GA: a normal tenant can hold it on a
+-- contract entitlement and its read surface is served, but nothing here says
+-- the module is generally available or that anything beyond the shipped read
+-- surfaces works.
+--
+-- There is no administrative path for catalog status yet. Nothing in this
+-- repository writes platform_module.status after this seed, so moving a module
+-- between 'planned', 'preview', 'available' and 'retired' is still a reviewed
+-- migration and seed change. That gap is real and is recorded in the "still not
+-- built" list of ADR 0013.
+--
+-- The insert below is 'on conflict (code) do nothing', so a database seeded
+-- before this change keeps its existing 'planned' rows. The update below is
+-- what moves an existing catalog to the status this file declares; it is
+-- idempotent and it only touches the three modules named here.
 
 begin;
 
@@ -21,13 +40,13 @@ values
    true, false, 'seat', 'planned', 20),
   ('work', 'Work', 'projects',
    'Engagements, projects, allocations, timesheets and project margin.',
-   true, false, 'employee', 'planned', 30),
+   true, false, 'employee', 'preview', 30),
   ('money', 'Money', 'finance',
    'Proposals, contracts, invoices, payments and expenses. ERP foundation for service businesses.',
-   true, false, 'employee', 'planned', 40),
+   true, false, 'employee', 'preview', 40),
   ('content', 'Content', 'content',
    'CMS, knowledge, assets and client document rooms.',
-   true, false, 'seat', 'planned', 50),
+   true, false, 'seat', 'preview', 50),
   ('procurement', 'Procurement', 'finance',
    'Purchase requests, vendors and approvals. Planned module.',
    true, false, 'employee', 'planned', 60),
@@ -38,6 +57,15 @@ values
    'Cross-module reporting and benchmarks. Planned module.',
    true, false, 'employee', 'planned', 80)
 on conflict (code) do nothing;
+
+-- The insert above cannot change an existing row, so a catalog seeded before
+-- 27 October 2026 still says 'planned' for these three modules. This moves
+-- exactly those rows and nothing else: a module already at 'preview',
+-- 'available' or 'retired' is left alone.
+update platform_module
+   set status = 'preview'
+ where code in ('work', 'money', 'content')
+   and status = 'planned';
 
 insert into platform_module_dependency (module_id, depends_on_module_id, optional, reason)
 select m.id, d.id, true, 'Allocation reads People availability when that module is licensed.'

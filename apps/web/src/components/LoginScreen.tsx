@@ -54,9 +54,9 @@ export function LoginScreen({ onEnter, onBlocked }: LoginScreenProps) {
             One calm home for the people behind the work.
           </p>
           <p className="auth-lede">
-            SaaSModels One starts with the people directory. The work and the
-            numbers layers are planned for later milestones. Access is checked
-            on the server, for every request.
+            SaaSModels One starts with the people directory and holds the work,
+            money and content around it. Access is checked on the server, for
+            every request.
           </p>
         </div>
         <ul className="auth-points">
@@ -64,8 +64,8 @@ export function LoginScreen({ onEnter, onBlocked }: LoginScreenProps) {
             <span className="point-index">01</span>
             <span>
               <strong>One shared directory</strong>
-              Person identity lives in the platform, not in separate modules.
-              Shared client identity is planned for a later milestone.
+              Person and client identity live in the platform, not in separate
+              modules.
             </span>
           </li>
           <li>

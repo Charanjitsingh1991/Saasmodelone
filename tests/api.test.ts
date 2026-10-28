@@ -357,7 +357,8 @@ describe('API request layer', () => {
           'people.compensation.read',
           'people.compensation.write',
           'work.read',
-          'work.write',
+          'money.read',
+          'content.read',
         ],
         switchAccess: true,
         modules: [
@@ -435,7 +436,9 @@ describe('API request layer', () => {
           name: 'Work',
           sortOrder: 30,
           canRead: true,
-          canWrite: true,
+          // work.write was withdrawn on 27 October 2026, so the context can no
+          // longer advertise a Work write that no route performs.
+          canWrite: false,
         },
       ]);
     });
@@ -461,7 +464,8 @@ describe('API request layer', () => {
           'people.compensation.read',
           'people.compensation.write',
           'work.read',
-          'work.write',
+          'money.read',
+          'content.read',
         ],
         switchAccess: true,
         modules: [
@@ -470,7 +474,7 @@ describe('API request layer', () => {
             name: 'Work',
             sortOrder: 30,
             canRead: true,
-            canWrite: true,
+            canWrite: false,
           },
         ],
       });

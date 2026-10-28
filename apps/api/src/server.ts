@@ -6,9 +6,15 @@ import {
   permissionsForRole,
   COMPENSATION_CTC_MINOR_MAX,
   COMPENSATION_PAY_FREQUENCIES,
+  CONTENT_LIST_DEFAULT_PAGE_SIZE,
+  CONTENT_LIST_MAX_PAGE_SIZE,
+  CONTENT_SEARCH_MAX_LENGTH,
   EMPLOYMENT_NOTICE_DAYS_MAX,
   EMPLOYMENT_STATUSES,
   EMPLOYMENT_TYPES,
+  MONEY_LIST_DEFAULT_PAGE_SIZE,
+  MONEY_LIST_MAX_PAGE_SIZE,
+  MONEY_SEARCH_MAX_LENGTH,
   PEOPLE_LIST_DEFAULT_PAGE_SIZE,
   PEOPLE_LIST_MAX_PAGE_SIZE,
   PEOPLE_SEARCH_MAX_LENGTH,
@@ -17,19 +23,28 @@ import {
   PERSON_NAME_MAX_LENGTH,
   PERSON_PHONE_MAX_LENGTH,
   PERSON_WORK_EMAIL_MAX_LENGTH,
+  WORK_LIST_DEFAULT_PAGE_SIZE,
+  WORK_LIST_MAX_PAGE_SIZE,
+  WORK_SEARCH_MAX_LENGTH,
   type ContextModule,
   type ContextResponse,
   type CompensationItem,
   type CompensationListResponse,
   type CompensationPayFrequency,
+  type ContentListItem,
+  type ContentListResponse,
   type EmploymentItem,
   type EmploymentListResponse,
   type EmploymentStatus,
   type EmploymentType,
+  type InvoiceListItem,
+  type InvoiceListResponse,
   type PeopleListItem,
   type PeopleListResponse,
   type PeoplePlacementInput,
   type PeoplePlacementOptions,
+  type ProjectListItem,
+  type ProjectListResponse,
   type SessionResponse,
 } from '@saasmodels/contracts';
 import Fastify, {
@@ -255,9 +270,12 @@ function requireCsrfToken(session: SessionRecord, request: FastifyRequest): void
 
 // The last page a caller may ask for. Anything larger, or a value that is not
 // a plain non-negative integer, is a client error rather than a database error.
-const PEOPLE_MAX_PAGE = 1_000_000;
+const LIST_MAX_PAGE = 1_000_000;
 
-function peopleQueryStringParam(
+// The three list parameters are read the same way for every list route - the
+// directory, the projects, the invoices and the content items - so a malformed
+// page or a repeated parameter is answered identically wherever it arrives.
+function queryStringParam(
   query: Record<string, unknown>,
   name: string,
 ): string | null {
@@ -273,25 +291,28 @@ function peopleQueryStringParam(
   return value;
 }
 
-function peopleSearchTerm(query: Record<string, unknown>): string {
-  const raw = peopleQueryStringParam(query, 'q');
+function listSearchTerm(
+  query: Record<string, unknown>,
+  maxLength: number,
+): string {
+  const raw = queryStringParam(query, 'q');
   if (raw === null) {
     return '';
   }
   const term = raw.trim();
-  if (term.length > PEOPLE_SEARCH_MAX_LENGTH) {
+  if (term.length > maxLength) {
     throw new ApiError(400, 'INVALID_QUERY');
   }
   return term;
 }
 
-function peopleIntegerParam(
+function listIntegerParam(
   query: Record<string, unknown>,
   name: string,
   fallback: number,
   max: number,
 ): number {
-  const raw = peopleQueryStringParam(query, name);
+  const raw = queryStringParam(query, name);
   if (raw === null) {
     return fallback;
   }
@@ -973,6 +994,178 @@ function checkCompensationValues(values: CompensationValues): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The Work, Money and Content read surfaces.
+//
+// Three list routes, one shape: the same page parameters, the same literal
+// search, the same count over the same predicate and the same body. What
+// differs is the table and the columns it names.
+//
+// Two rules hold for all three:
+//
+// - No scope predicate is restated here. The transaction sets app.tenant_id
+//   and app.user_id, the permissive tenant_isolation policy keeps the rows
+//   inside the tenant, and the restrictive module_work_read,
+//   module_money_read and module_content_read policies narrow them further.
+//   The route never filters on tenant_id.
+// - Money is read as text and converted here. The columns are bigint minor
+//   units and only the database can promise their full range, so a value
+//   outside Number.MAX_SAFE_INTEGER is refused rather than rounded. This is
+//   the same convention as the compensation read in ADR 0011.
+// ---------------------------------------------------------------------------
+
+// A bigint the runtime can read but a JavaScript number cannot hold exactly.
+// Answering 500 is honest; answering a rounded figure on a money column is
+// not, and no caller downstream can tell the difference.
+function minorAmount(value: string): number {
+  const amount = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(amount)) {
+    throw new ApiError(500, 'INTERNAL_ERROR');
+  }
+  return amount;
+}
+
+// The Work route names only the columns it returns. project carries the M0
+// table-level grant, so the runtime could read more of it than this route
+// chooses to: source_system, source_id, import_batch_id, imported_at,
+// budget_hours, manager_user_id and tenant_id are never selected here.
+const PROJECT_SELECT = `select p.id,
+                    p.code,
+                    p.name,
+                    p.client_id,
+                    c.name as client_name,
+                    p.status,
+                    p.currency,
+                    to_char(p.start_date, 'YYYY-MM-DD') as start_date,
+                    to_char(p.end_date, 'YYYY-MM-DD') as end_date,
+                    p.budget_minor::text as budget_minor`;
+
+// The client is shared-directory data with no module policy of its own, so it
+// is joined the way the directory joins its reference tables: by the globally
+// unique id, never by tenant_id, and a soft-deleted client answers with a null
+// name rather than a retired one.
+const PROJECT_FROM = `from project p
+          left join client c on c.id = p.client_id and c.deleted_at is null`;
+
+type ProjectRow = {
+  id: string;
+  code: string | null;
+  name: string;
+  client_id: string;
+  client_name: string | null;
+  status: string;
+  currency: string;
+  start_date: string | null;
+  end_date: string | null;
+  budget_minor: string | null;
+};
+
+function projectItemFromRow(row: ProjectRow): ProjectListItem {
+  return {
+    id: row.id,
+    code: row.code,
+    name: row.name,
+    clientId: row.client_id,
+    clientName: row.client_name,
+    status: row.status,
+    currency: row.currency,
+    startDate: row.start_date,
+    endDate: row.end_date,
+    budgetMinor: row.budget_minor === null ? null : minorAmount(row.budget_minor),
+  };
+}
+
+// The Money route names only the columns it returns, and every amount is the
+// stored minor-unit figure beside its own currency code. There is no rate, no
+// jurisdiction and no derived state in this query: tax_minor is the stored tax
+// amount and total_minor is the stored total.
+const INVOICE_SELECT = `select i.id,
+                    i.number,
+                    i.client_id,
+                    c.name as client_name,
+                    i.status,
+                    to_char(i.issue_date, 'YYYY-MM-DD') as issue_date,
+                    to_char(i.due_date, 'YYYY-MM-DD') as due_date,
+                    i.currency,
+                    i.subtotal_minor::text as subtotal_minor,
+                    i.tax_minor::text as tax_minor,
+                    i.total_minor::text as total_minor,
+                    i.amount_paid_minor::text as amount_paid_minor`;
+
+const INVOICE_FROM = `from invoice i
+          left join client c on c.id = i.client_id and c.deleted_at is null`;
+
+type InvoiceRow = {
+  id: string;
+  number: string;
+  client_id: string;
+  client_name: string | null;
+  status: string;
+  issue_date: string;
+  due_date: string;
+  currency: string;
+  subtotal_minor: string;
+  tax_minor: string;
+  total_minor: string;
+  amount_paid_minor: string;
+};
+
+function invoiceItemFromRow(row: InvoiceRow): InvoiceListItem {
+  return {
+    id: row.id,
+    number: row.number,
+    clientId: row.client_id,
+    clientName: row.client_name,
+    status: row.status,
+    issueDate: row.issue_date,
+    dueDate: row.due_date,
+    currency: row.currency,
+    subtotalMinor: minorAmount(row.subtotal_minor),
+    taxMinor: minorAmount(row.tax_minor),
+    totalMinor: minorAmount(row.total_minor),
+    amountPaidMinor: minorAmount(row.amount_paid_minor),
+  };
+}
+
+// The Content route names only the columns it returns. A content item has no
+// client column, so this query joins nothing. The two timestamps are rendered
+// as calendar days in UTC, so a session timezone cannot shift a stored day and
+// a published item reads the same for every reader.
+const CONTENT_SELECT = `select ct.id,
+                    ct.kind,
+                    ct.slug,
+                    ct.title,
+                    ct.locale,
+                    ct.status,
+                    to_char(ct.published_at at time zone 'UTC', 'YYYY-MM-DD') as published_at,
+                    to_char(ct.updated_at at time zone 'UTC', 'YYYY-MM-DD') as updated_at`;
+
+const CONTENT_FROM = 'from content_item ct';
+
+type ContentRow = {
+  id: string;
+  kind: string;
+  slug: string;
+  title: string;
+  locale: string;
+  status: string;
+  published_at: string | null;
+  updated_at: string;
+};
+
+function contentItemFromRow(row: ContentRow): ContentListItem {
+  return {
+    id: row.id,
+    kind: row.kind,
+    slug: row.slug,
+    title: row.title,
+    locale: row.locale,
+    status: row.status,
+    publishedAt: row.published_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function validateRateLimit(options: RateLimitOptions, name: string): RateLimitOptions {
   if (
     !Number.isInteger(options.max) ||
@@ -1134,15 +1327,19 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
     }
   });
 
-  // Auth, context and directory responses carry credentials, session,
+  // Auth, context, directory and module responses carry credentials, session,
   // authorization or tenant data and must never be cached by a browser, proxy
   // or shared cache, including error responses. Every People path is covered by
-  // prefix, so a write, a 4xx and a 5xx are all no-store too.
+  // prefix, so a write, a 4xx and a 5xx are all no-store too, and the three
+  // module read surfaces are covered the same way.
   app.addHook('onSend', async (request, reply) => {
     if (
       request.url.startsWith('/v1/auth/') ||
       request.url.startsWith('/v1/context') ||
-      request.url.startsWith('/v1/people')
+      request.url.startsWith('/v1/people') ||
+      request.url.startsWith('/v1/work') ||
+      request.url.startsWith('/v1/money') ||
+      request.url.startsWith('/v1/content')
     ) {
       reply.header('cache-control', 'no-store');
     }
@@ -1292,9 +1489,9 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
     }
 
     const query = request.query as Record<string, unknown>;
-    const searchTerm = peopleSearchTerm(query);
-    const page = peopleIntegerParam(query, 'page', 1, PEOPLE_MAX_PAGE);
-    const pageSize = peopleIntegerParam(
+    const searchTerm = listSearchTerm(query, PEOPLE_SEARCH_MAX_LENGTH);
+    const page = listIntegerParam(query, 'page', 1, LIST_MAX_PAGE);
+    const pageSize = listIntegerParam(
       query,
       'pageSize',
       PEOPLE_LIST_DEFAULT_PAGE_SIZE,
@@ -2666,6 +2863,220 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
     }
 
     return reply;
+  });
+
+  // The Work read surface. One gate, one predicate, one body.
+  app.get('/v1/work/projects', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+
+    const query = request.query as Record<string, unknown>;
+    const searchTerm = listSearchTerm(query, WORK_SEARCH_MAX_LENGTH);
+    const page = listIntegerParam(query, 'page', 1, LIST_MAX_PAGE);
+    const pageSize = listIntegerParam(
+      query,
+      'pageSize',
+      WORK_LIST_DEFAULT_PAGE_SIZE,
+      WORK_LIST_MAX_PAGE_SIZE,
+    );
+
+    try {
+      // The gate is checked inside the transaction, so entitlement is answered
+      // before the role is and both before a row is read. The restrictive
+      // module_work_read policy narrows what this read can see; no scope
+      // predicate is restated here.
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'work', operation: 'read' },
+        },
+        async (client) => {
+          const clauses = ['p.deleted_at is null'];
+          const filterValues: string[] = [];
+          if (searchTerm !== '') {
+            filterValues.push(searchTerm);
+            const needle = `$${filterValues.length}`;
+            // strpos over the lowered columns is a literal match, so a search
+            // for "%" or "_" cannot behave like a LIKE wildcard.
+            clauses.push(
+              `(strpos(lower(p.name), lower(${needle})) > 0
+                 or strpos(lower(coalesce(p.code, '')), lower(${needle})) > 0
+                 or strpos(lower(coalesce(c.name, '')), lower(${needle})) > 0)`,
+            );
+          }
+          const where = clauses.join(' and ');
+          const limitIndex = filterValues.length + 1;
+
+          const matching = await client.query<{ total: string }>(
+            `select count(*) as total ${PROJECT_FROM} where ${where}`,
+            filterValues,
+          );
+          const pageRows = await client.query<ProjectRow>(
+            `${PROJECT_SELECT}
+              ${PROJECT_FROM}
+              where ${where}
+              order by lower(p.name), p.id
+              limit $${limitIndex} offset $${limitIndex + 1}`,
+            [...filterValues, pageSize, (page - 1) * pageSize],
+          );
+
+          const items: ProjectListItem[] = pageRows.rows.map(projectItemFromRow);
+
+          const body: ProjectListResponse = {
+            items,
+            total: Number(matching.rows[0]?.total ?? '0'),
+            page,
+            pageSize,
+          };
+          return body;
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  // The Money read surface. The same shape, and the same refusal of an amount
+  // a JavaScript number cannot hold exactly.
+  app.get('/v1/money/invoices', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+
+    const query = request.query as Record<string, unknown>;
+    const searchTerm = listSearchTerm(query, MONEY_SEARCH_MAX_LENGTH);
+    const page = listIntegerParam(query, 'page', 1, LIST_MAX_PAGE);
+    const pageSize = listIntegerParam(
+      query,
+      'pageSize',
+      MONEY_LIST_DEFAULT_PAGE_SIZE,
+      MONEY_LIST_MAX_PAGE_SIZE,
+    );
+
+    try {
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'money', operation: 'read' },
+        },
+        async (client) => {
+          const clauses: string[] = [];
+          const filterValues: string[] = [];
+          if (searchTerm !== '') {
+            filterValues.push(searchTerm);
+            const needle = `$${filterValues.length}`;
+            clauses.push(
+              `(strpos(lower(i.number), lower(${needle})) > 0
+                 or strpos(lower(coalesce(c.name, '')), lower(${needle})) > 0)`,
+            );
+          }
+          const where = clauses.length === 0 ? 'true' : clauses.join(' and ');
+          const limitIndex = filterValues.length + 1;
+
+          const matching = await client.query<{ total: string }>(
+            `select count(*) as total ${INVOICE_FROM} where ${where}`,
+            filterValues,
+          );
+          const pageRows = await client.query<InvoiceRow>(
+            `${INVOICE_SELECT}
+              ${INVOICE_FROM}
+              where ${where}
+              order by lower(i.number), i.id
+              limit $${limitIndex} offset $${limitIndex + 1}`,
+            [...filterValues, pageSize, (page - 1) * pageSize],
+          );
+
+          const items: InvoiceListItem[] = pageRows.rows.map(invoiceItemFromRow);
+
+          const body: InvoiceListResponse = {
+            items,
+            total: Number(matching.rows[0]?.total ?? '0'),
+            page,
+            pageSize,
+          };
+          return body;
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  // The Content read surface. A content item has no client, so this query joins
+  // nothing and the client grant does not reach it.
+  app.get('/v1/content/items', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+
+    const query = request.query as Record<string, unknown>;
+    const searchTerm = listSearchTerm(query, CONTENT_SEARCH_MAX_LENGTH);
+    const page = listIntegerParam(query, 'page', 1, LIST_MAX_PAGE);
+    const pageSize = listIntegerParam(
+      query,
+      'pageSize',
+      CONTENT_LIST_DEFAULT_PAGE_SIZE,
+      CONTENT_LIST_MAX_PAGE_SIZE,
+    );
+
+    try {
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'content', operation: 'read' },
+        },
+        async (client) => {
+          const clauses = ['ct.deleted_at is null'];
+          const filterValues: string[] = [];
+          if (searchTerm !== '') {
+            filterValues.push(searchTerm);
+            const needle = `$${filterValues.length}`;
+            clauses.push(
+              `(strpos(lower(ct.title), lower(${needle})) > 0
+                 or strpos(lower(ct.slug), lower(${needle})) > 0
+                 or strpos(lower(ct.kind), lower(${needle})) > 0)`,
+            );
+          }
+          const where = clauses.join(' and ');
+          const limitIndex = filterValues.length + 1;
+
+          const matching = await client.query<{ total: string }>(
+            `select count(*) as total ${CONTENT_FROM} where ${where}`,
+            filterValues,
+          );
+          const pageRows = await client.query<ContentRow>(
+            `${CONTENT_SELECT}
+              ${CONTENT_FROM}
+              where ${where}
+              order by lower(ct.title), ct.id
+              limit $${limitIndex} offset $${limitIndex + 1}`,
+            [...filterValues, pageSize, (page - 1) * pageSize],
+          );
+
+          const items: ContentListItem[] = pageRows.rows.map(contentItemFromRow);
+
+          const body: ContentListResponse = {
+            items,
+            total: Number(matching.rows[0]?.total ?? '0'),
+            page,
+            pageSize,
+          };
+          return body;
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
   });
 
   if (enableProofRoutes) {

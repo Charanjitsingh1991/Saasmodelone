@@ -2392,14 +2392,15 @@ describe('Compensation write inventory', () => {
     });
   });
 
-  test('publishes six permissions and never answers a module operation with either compensation name', () => {
+  test('publishes seven permissions and never answers a module operation with either compensation name', () => {
     expect(PERMISSIONS).toEqual([
       'people.read',
       'people.write',
       'people.compensation.read',
       'people.compensation.write',
       'work.read',
-      'work.write',
+      'money.read',
+      'content.read',
     ]);
     expect(PERMISSIONS.indexOf(COMPENSATION_PERMISSION)).toBe(
       PERMISSIONS.indexOf('people.compensation.read') + 1,
@@ -2411,7 +2412,8 @@ describe('Compensation write inventory', () => {
     expect(permissionFor('people', 'read')).toBe('people.read');
     expect(permissionFor('people', 'write')).toBe('people.write');
     expect(permissionFor('work', 'read')).toBe('work.read');
-    expect(permissionFor('work', 'write')).toBe('work.write');
+    // work.write was withdrawn on 27 October 2026, so no gate can ask for it.
+    expect(permissionFor('work', 'write')).toBeNull();
     expect(permissionFor('people', 'read')).not.toBe(COMPENSATION_PERMISSION);
     expect(permissionFor('people', 'write')).not.toBe(COMPENSATION_PERMISSION);
   });

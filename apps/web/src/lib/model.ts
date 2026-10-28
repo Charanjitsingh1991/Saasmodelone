@@ -3,6 +3,8 @@ import type {
   ContextResponse,
   MembershipRole,
 } from '@saasmodels/contracts';
+import { formatMinorAmount } from './money.js';
+import { moduleScreenPath } from './router.js';
 
 const ROLE_LABELS: Record<MembershipRole, string> = {
   owner: 'Owner',
@@ -59,22 +61,37 @@ export function canWriteCompensation(context: ContextResponse): boolean {
   return context.permissions.includes('people.compensation.write');
 }
 
-// Money is stored as a bigint count of minor units, and the compensation table
-// records no decimal exponent, so this renders two fractional digits for every
-// currency. That is a display convention, not a conversion: the figure is the
-// stored value, nothing is annualised, prorated or relabelled, and a currency
-// whose minor unit is not a hundredth would be misread - which is why the value
-// stays next to its own currency code instead of being called a salary period.
-// Grouping is done here rather than with Intl.NumberFormat so the separators do
-// not depend on the locale data of whichever machine renders it.
+// The salary history renders a stored amount, and so does every other money
+// column in the product. There is one implementation of that convention:
+// formatMinorAmount in lib/money. This stays as the name the directory panel
+// already uses.
 export function formatCompensationAmount(
   minorUnits: number,
   currency: string,
 ): string {
-  const whole = Math.floor(minorUnits / 100);
-  const fraction = minorUnits % 100;
-  const grouped = String(whole).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  return `${grouped}.${String(fraction).padStart(2, '0')} ${currency}`;
+  return formatMinorAmount(minorUnits, currency);
+}
+
+// A module is readable when the server's own context says so. The screen asks
+// the same question for every module it can show, so a module without a read
+// is never offered a screen that the API would refuse.
+export function canReadModule(context: ContextResponse, code: string): boolean {
+  return findModule(context, code)?.canRead === true;
+}
+
+// The landing rule: the first navigation module, in catalog order, that has a
+// screen. A module without a screen cannot be a landing page, so a member whose
+// only module is Work lands on the Work screen rather than on a home page that
+// only lists modules. A member with no module that has a screen lands on the
+// home page, which is where the module roster is.
+export function landingPath(context: ContextResponse): string {
+  for (const module of navigationModules(context)) {
+    const path = moduleScreenPath(module.code);
+    if (path) {
+      return path;
+    }
+  }
+  return '/app';
 }
 
 export function accessLabel(module: ContextModule): string {

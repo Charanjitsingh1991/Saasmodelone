@@ -4,16 +4,22 @@ import type {
   CompensationItem,
   CompensationListResponse,
   CompensationUpdateInput,
+  ContentListInput,
+  ContentListResponse,
   EmploymentCreateInput,
   EmploymentItem,
   EmploymentListResponse,
   EmploymentUpdateInput,
+  InvoiceListInput,
+  InvoiceListResponse,
   PeopleCreateInput,
   PeopleListItem,
   PeopleListResponse,
   PeoplePlacementInput,
   PeoplePlacementOptions,
   PeopleUpdateInput,
+  ProjectListInput,
+  ProjectListResponse,
   SessionResponse,
 } from '@saasmodels/contracts';
 
@@ -104,26 +110,62 @@ function writeHeaders(): Record<string, string> {
   };
 }
 
+// The query string every list route takes: a search term, a page and a page
+// size. One builder for all four lists, so the three module screens ask for
+// exactly what the directory asks for.
+function listQuery(input: {
+  q?: string;
+  page?: number;
+  pageSize?: number;
+}): string {
+  const params = new URLSearchParams();
+  const term = input.q?.trim();
+  if (term) {
+    params.set('q', term);
+  }
+  if (input.page !== undefined) {
+    params.set('page', String(input.page));
+  }
+  if (input.pageSize !== undefined) {
+    params.set('pageSize', String(input.pageSize));
+  }
+  return params.toString();
+}
+
 export const api = {
   session: () => request<SessionResponse>('/v1/auth/session'),
 
   context: () => request<ContextResponse>('/v1/context'),
 
   people: (input: PeopleListInput = {}) => {
-    const params = new URLSearchParams();
-    const term = input.q?.trim();
-    if (term) {
-      params.set('q', term);
-    }
-    if (input.page !== undefined) {
-      params.set('page', String(input.page));
-    }
-    if (input.pageSize !== undefined) {
-      params.set('pageSize', String(input.pageSize));
-    }
-    const query = params.toString();
+    const query = listQuery(input);
     return request<PeopleListResponse>(
       query === '' ? '/v1/people' : `/v1/people?${query}`,
+    );
+  },
+
+  // The Work read surface. A GET, so no CSRF header; the server gates it on
+  // work.read and the module policy narrows the rows.
+  workProjects: (input: ProjectListInput = {}) => {
+    const query = listQuery(input);
+    return request<ProjectListResponse>(
+      query === '' ? '/v1/work/projects' : `/v1/work/projects?${query}`,
+    );
+  },
+
+  // The Money read surface. The server gates it on money.read.
+  moneyInvoices: (input: InvoiceListInput = {}) => {
+    const query = listQuery(input);
+    return request<InvoiceListResponse>(
+      query === '' ? '/v1/money/invoices' : `/v1/money/invoices?${query}`,
+    );
+  },
+
+  // The Content read surface. The server gates it on content.read.
+  contentItems: (input: ContentListInput = {}) => {
+    const query = listQuery(input);
+    return request<ContentListResponse>(
+      query === '' ? '/v1/content/items' : `/v1/content/items?${query}`,
     );
   },
 

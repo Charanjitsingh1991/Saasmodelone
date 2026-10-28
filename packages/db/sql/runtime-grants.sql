@@ -111,6 +111,38 @@ grant update (
   effective_from, effective_to, ctc_minor, currency, pay_frequency
 ) on table public.compensation to saas_runtime;
 
+-- The Work, Money and Content read surfaces. Three column-only SELECT grants,
+-- one per table, for exactly the columns the three routes name. There is no
+-- table-level privilege on any of the three and no INSERT, UPDATE or DELETE on
+-- invoice, content_item or client: the runtime role has no path that could
+-- create, change or remove an invoice or a content item, and there is still no
+-- product write route and no write screen in any of the three modules.
+--
+-- public.project is not in this list because it already carries the M0
+-- table-level grant above, which the M0 module denial proof depends on: those
+-- tests must fail on the restrictive RLS policy, not on a missing table
+-- privilege. Narrowing that grant is deferred to the Work write slice, and
+-- until then the Work route names only the columns it returns.
+--
+-- public.client is platform-owned shared directory data. It has no module
+-- policy - only the permissive tenant_isolation policy - exactly like
+-- legal_entity and org_unit, so the column grant follows that precedent: the
+-- rows are reached by their globally unique id and never filtered on tenant_id
+-- in the route. Its exposure is bounded by the route that reads it, and the
+-- only two routes that read a client name are module-gated.
+grant select (
+  id, client_id, number, status, issue_date, due_date, currency,
+  subtotal_minor, tax_minor, total_minor, amount_paid_minor
+) on table public.invoice to saas_runtime;
+
+grant select (
+  id, kind, slug, title, locale, status, published_at, updated_at, deleted_at
+) on table public.content_item to saas_runtime;
+
+grant select (
+  id, name, code, status, deleted_at
+) on table public.client to saas_runtime;
+
 -- Append-only audit writer. No SELECT, UPDATE or DELETE is granted.
 grant insert on table public.audit_event to saas_runtime;
 

@@ -4,21 +4,23 @@ import { api, setCsrfToken, setUnauthorizedListener } from './api';
 import { AppShell } from './components/AppShell';
 import { LoginScreen } from './components/LoginScreen';
 import {
+  ContentScreen,
+  ModuleAccessState,
+  MoneyScreen,
+  WorkScreen,
+} from './components/ModuleScreens';
+import {
   HomeScreen,
   NotFoundScreen,
   PeopleAccessState,
   PeopleScreen,
 } from './components/Screens';
 import { BlockedState, BootState, OfflineState } from './components/States';
-import { canReadPeople } from './lib/model';
-import { parseRoute, routeTitle, type Route } from './lib/router';
+import { canReadModule, canReadPeople, landingPath } from './lib/model';
+import { moduleScreenPath, parseRoute, routeTitle, type Route } from './lib/router';
 import { applyTheme, currentTheme, type Theme } from './lib/theme';
 
 type BootPhase = 'loading' | 'anonymous' | 'ready' | 'blocked' | 'offline';
-
-function landingPath(context: ContextResponse): string {
-  return canReadPeople(context) ? '/app/people' : '/app';
-}
 
 export function App() {
   const [boot, setBoot] = useState<BootPhase>('loading');
@@ -68,15 +70,16 @@ export function App() {
       }
       setContext(result.data);
       setBoot('ready');
-      // A signed-in reload of an app route keeps that route. Sign-in starts
-      // from the login route and lands on the first accessible module.
+      // A signed-in reload of a module route keeps that route, and the home
+      // route stays the home route. Sign-in starts from the login route and
+      // lands on the first module that has a screen.
       const requested = parseRoute(window.location.pathname);
       const destination =
-        requested.name === 'people'
-          ? '/app/people'
-          : requested.name === 'home'
-            ? '/app'
-            : landingPath(result.data);
+        requested.name === 'home'
+          ? '/app'
+          : requested.name === 'login' || requested.name === 'not-found'
+            ? landingPath(result.data)
+            : (moduleScreenPath(requested.name) ?? landingPath(result.data));
       navigate(destination, true);
     },
     [navigate],
@@ -180,6 +183,36 @@ export function App() {
         <PeopleScreen context={context} />
       ) : (
         <PeopleAccessState context={context} onNavigate={navigate} />
+      )
+    ) : route.name === 'work' ? (
+      canReadModule(context, 'work') ? (
+        <WorkScreen context={context} />
+      ) : (
+        <ModuleAccessState
+          context={context}
+          moduleName="Work"
+          onNavigate={navigate}
+        />
+      )
+    ) : route.name === 'money' ? (
+      canReadModule(context, 'money') ? (
+        <MoneyScreen context={context} />
+      ) : (
+        <ModuleAccessState
+          context={context}
+          moduleName="Money"
+          onNavigate={navigate}
+        />
+      )
+    ) : route.name === 'content' ? (
+      canReadModule(context, 'content') ? (
+        <ContentScreen context={context} />
+      ) : (
+        <ModuleAccessState
+          context={context}
+          moduleName="Content"
+          onNavigate={navigate}
+        />
       )
     ) : route.name === 'home' ? (
       <HomeScreen context={context} onNavigate={navigate} />

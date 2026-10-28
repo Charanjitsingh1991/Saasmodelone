@@ -8,14 +8,17 @@ import {
   accessLabel,
   availableModuleNames,
   canReadCompensation,
+  canReadModule,
   canReadPeople,
   canWriteCompensation,
   findModule,
   formatCompensationAmount,
+  landingPath,
   navigationModules,
   orderModules,
   roleLabel,
 } from '../src/lib/model';
+import { formatMinorAmount } from '../src/lib/money';
 
 function module(
   code: string,
@@ -34,7 +37,8 @@ const OWNER_PERMISSIONS: Permission[] = [
   'people.compensation.read',
   'people.compensation.write',
   'work.read',
-  'work.write',
+  'money.read',
+  'content.read',
 ];
 
 function context(modules: ContextModule[], permissions = OWNER_PERMISSIONS): ContextResponse {
@@ -115,7 +119,7 @@ describe('module presentation', () => {
     // permission: a manager sees colleagues and their employment, not their cost.
     expect(
       canReadCompensation(
-        context([module('people', 10)], ['people.read', 'work.read', 'work.write']),
+        context([module('people', 10)], ['people.read', 'work.read', 'money.read']),
       ),
     ).toBe(false);
     expect(canReadCompensation(context([module('people', 10)], []))).toBe(false);
@@ -166,5 +170,68 @@ describe('module presentation', () => {
     expect(formatCompensationAmount(1234567890123, 'ZZZ')).toBe(
       '12,345,678,901.23 ZZZ',
     );
+  });
+
+  test('renders a money figure through the one implementation', () => {
+    // formatMinorAmount is the single implementation of the display convention
+    // and formatCompensationAmount is its delegate, so a salary and an invoice
+    // can never be rendered by two different rules.
+    expect(formatMinorAmount(1234567, 'INR')).toBe('12,345.67 INR');
+    expect(formatMinorAmount(0, 'USD')).toBe('0.00 USD');
+    expect(formatMinorAmount(5, 'USD')).toBe('0.05 USD');
+    expect(formatMinorAmount(100, 'EUR')).toBe('1.00 EUR');
+    expect(formatMinorAmount(1234567890123, 'ZZZ')).toBe(
+      '12,345,678,901.23 ZZZ',
+    );
+
+    for (const [minorUnits, currency] of [
+      [0, 'USD'],
+      [5, 'USD'],
+      [100, 'EUR'],
+      [1234567, 'INR'],
+      [1234567890123, 'ZZZ'],
+    ] as const) {
+      expect(formatCompensationAmount(minorUnits, currency)).toBe(
+        formatMinorAmount(minorUnits, currency),
+      );
+    }
+  });
+
+  test('reads a module only when the server context says so', () => {
+    expect(canReadModule(context([module('work', 30)]), 'work')).toBe(true);
+    expect(canReadModule(context([module('work', 30, false, false)]), 'work')).toBe(
+      false,
+    );
+    expect(canReadModule(context([module('people', 10)]), 'work')).toBe(false);
+    expect(canReadModule(context([]), 'money')).toBe(false);
+  });
+
+  test('lands on the first navigation module that has a screen', () => {
+    // The rule is catalog order, and a module with a screen wins over one
+    // without. People sits at 10 and Work at 30, so a member holding both
+    // lands on People.
+    expect(
+      landingPath(
+        context([module('work', 30), module('people', 10), module('money', 40)]),
+      ),
+    ).toBe('/app/people');
+
+    // A member whose only module is Work lands on the Work screen, not on the
+    // home page: the home page only lists modules.
+    expect(landingPath(context([module('work', 30)]))).toBe('/app/work');
+    expect(landingPath(context([module('money', 40)]))).toBe('/app/money');
+    expect(landingPath(context([module('content', 50)]))).toBe('/app/content');
+
+    // A module that cannot be read is not a navigation module, so it cannot
+    // be a landing page either.
+    expect(
+      landingPath(context([module('work', 30, false, false)])),
+    ).toBe('/app');
+
+    // A member with no module that has a screen lands on the home page.
+    expect(landingPath(context([]))).toBe('/app');
+    expect(
+      landingPath(context([module('crm', 20, false, false)])),
+    ).toBe('/app');
   });
 });

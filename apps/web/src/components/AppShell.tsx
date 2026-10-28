@@ -5,13 +5,14 @@ import {
   navigationModules,
   roleLabel,
 } from '../lib/model';
+import { moduleScreenPath, type ModuleRouteName } from '../lib/router';
 import { nextTheme, type Theme } from '../lib/theme';
 import { Brand } from './Brand';
 
 type AppShellProps = {
   context: ContextResponse;
   theme: Theme;
-  routeName: 'home' | 'people' | 'not-found';
+  routeName: 'home' | ModuleRouteName | 'not-found';
   onNavigate: (path: string) => void;
   onThemeChange: (theme: Theme) => void;
   onSignOut: () => Promise<void>;
@@ -96,14 +97,19 @@ export function AppShell({
           <p className="nav-label">Modules</p>
           {modules.map((module) => {
             const state = accessLabel(module);
-            if (module.code === 'people') {
+            // A module with a screen is a link; a module without one stays a
+            // pending item. The two answers come from the same module-to-route
+            // map the landing path reads, so a module can never be a link here
+            // and a pending item there.
+            const path = moduleScreenPath(module.code);
+            if (path) {
               return (
                 <a
                   key={module.code}
                   className="nav-item"
-                  href="/app/people"
-                  aria-current={routeName === 'people' ? 'page' : undefined}
-                  onClick={(event) => follow(event, '/app/people')}
+                  href={path}
+                  aria-current={routeName === module.code ? 'page' : undefined}
+                  onClick={(event) => follow(event, path)}
                 >
                   <span className="nav-name">{module.name}</span>
                   <span className="nav-state">{state}</span>

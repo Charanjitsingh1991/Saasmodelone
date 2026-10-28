@@ -795,9 +795,11 @@ test('signs in, searches, creates and edits the directory, gates People and pers
   expect(focusRing).toEqual({ outlineStyle: 'solid', outlineWidth: '2px' });
   await page.keyboard.press('Enter');
 
-  await expect(page).toHaveURL(/\/app$/);
+  // The landing rule is the first navigation module that has a screen, so a
+  // Work-only member lands on the Work screen and not on the home page.
+  await expect(page).toHaveURL(/\/app\/work$/);
   await expect(
-    page.getByRole('heading', { name: 'Your workspace is ready.' }),
+    page.getByRole('heading', { name: 'Projects', exact: true }),
   ).toBeVisible();
   const workNav = page.getByRole('navigation', { name: 'Modules' });
   await expect(workNav.getByText('Work')).toBeVisible();
