@@ -15,6 +15,13 @@ import type {
   CrmContactItem,
   CrmContactListResponse,
   CrmContactUpdateInput,
+  CrmLeadConversionInput,
+  CrmLeadConversionResponse,
+  CrmLeadCreateInput,
+  CrmLeadItem,
+  CrmLeadListInput,
+  CrmLeadListResponse,
+  CrmLeadUpdateInput,
   EmploymentCreateInput,
   EmploymentItem,
   EmploymentListResponse,
@@ -120,10 +127,12 @@ function writeHeaders(): Record<string, string> {
 }
 
 // The query string every list route takes: a search term, a page and a page
-// size. One builder for all five list surfaces, so the directory and the four
-// module screens ask for exactly the same page.
+// size - plus the stage filter the lead list adds. One builder for every list
+// surface, so the directory and the module screens ask for exactly the same
+// page.
 function listQuery(input: {
   q?: string;
+  stage?: string;
   page?: number;
   pageSize?: number;
 }): string {
@@ -131,6 +140,9 @@ function listQuery(input: {
   const term = input.q?.trim();
   if (term) {
     params.set('q', term);
+  }
+  if (input.stage !== undefined && input.stage !== '') {
+    params.set('stage', input.stage);
   }
   if (input.page !== undefined) {
     params.set('page', String(input.page));
@@ -207,6 +219,42 @@ export const api = {
       `/v1/crm/accounts/${encodeURIComponent(accountId)}/contacts/${encodeURIComponent(contactId)}`,
       {
         method: 'PATCH',
+        headers: writeHeaders(),
+        body: JSON.stringify(input),
+      },
+    ),
+
+  // The CRM lead surface. A lead is CRM-private, so both the route gate and the
+  // module policy on its own table have to allow the request. The read takes an
+  // exact stage filter as well as the shared search and paging.
+  crmLeads: (input: CrmLeadListInput = {}) => {
+    const query = listQuery(input);
+    return request<CrmLeadListResponse>(
+      query === '' ? '/v1/crm/leads' : `/v1/crm/leads?${query}`,
+    );
+  },
+
+  createCrmLead: (input: CrmLeadCreateInput) =>
+    request<CrmLeadItem>('/v1/crm/leads', {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify(input),
+    }),
+
+  updateCrmLead: (id: string, input: CrmLeadUpdateInput) =>
+    request<CrmLeadItem>(`/v1/crm/leads/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: writeHeaders(),
+      body: JSON.stringify(input),
+    }),
+
+  // Conversion writes an account, a contact and the lead in one transaction.
+  // The body names a stored currency code and, optionally, the account name.
+  convertCrmLead: (id: string, input: CrmLeadConversionInput) =>
+    request<CrmLeadConversionResponse>(
+      `/v1/crm/leads/${encodeURIComponent(id)}/convert`,
+      {
+        method: 'POST',
         headers: writeHeaders(),
         body: JSON.stringify(input),
       },

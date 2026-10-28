@@ -2257,7 +2257,7 @@ describe('Employment grants and the directory it sits beside', () => {
     expect(acl.filter((entry) => entry.startsWith('saas_runtime='))).toHaveLength(1);
   });
 
-  test('adds no migration of its own: the ledger holds fourteen applied versions, newest 0014', async () => {
+  test('adds no migration of its own: the ledger holds fifteen applied versions, newest 0015', async () => {
     const ledger = await withOwner(async (client) => {
       const result = await client.query<{ version: string; status: string }>(
         `select version, status from infra.schema_migration
@@ -2269,12 +2269,13 @@ describe('Employment grants and the directory it sits beside', () => {
 
     // Employment added no version between 0001 and 0011. The thirteenth and
     // fourteenth - 0013_compensation_read.sql and 0014_compensation_write.sql -
-    // belong to the compensation slices and change nothing here. The ledger is
-    // pinned so a fifth history migration cannot arrive without being named in
-    // this suite too.
-    expect(ledger).toHaveLength(14);
+    // belong to the compensation slices, and the fifteenth - 0015_crm_leads.sql
+    // to the CRM lead slice; all three change nothing here. The ledger is pinned
+    // so a fifth history migration cannot arrive without being named in this
+    // suite too.
+    expect(ledger).toHaveLength(15);
     expect(one(ledger).version).toBe('0001_core.sql');
-    expect(ledger[ledger.length - 1]?.version).toBe('0014_compensation_write.sql');
+    expect(ledger[ledger.length - 1]?.version).toBe('0015_crm_leads.sql');
   });
 
   test('leaves the directory row and the export byte-identical to before the writes', async () => {

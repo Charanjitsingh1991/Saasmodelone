@@ -1008,14 +1008,15 @@ describe('Compensation read inventory', () => {
       return result.rows;
     });
 
-    // Fourteen versions are applied, and 0013 is the thirteenth of them. The
+    // Fifteen versions are applied, and 0013 is the thirteenth of them. The
     // fourteenth is this table's write half - 0014_compensation_write.sql, pinned
-    // by tests/people-compensation-write.test.ts, which also proves it is the
-    // newest and that nothing else in the ledger moved.
-    expect(ledger).toHaveLength(14);
+    // by tests/people-compensation-write.test.ts - and the fifteenth is the CRM
+    // lead file, which changes nothing here.
+    expect(ledger).toHaveLength(15);
     expect(ledger.every((row) => row.status === 'applied')).toBe(true);
     expect(ledger[0]?.version).toBe('0001_core.sql');
     expect(ledger[12]?.version).toBe('0013_compensation_read.sql');
+    expect(ledger[14]?.version).toBe('0015_crm_leads.sql');
   });
 
   test('gives the runtime the compensation columns it needs and no table privilege', async () => {

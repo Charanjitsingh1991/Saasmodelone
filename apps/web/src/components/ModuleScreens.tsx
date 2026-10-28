@@ -70,6 +70,13 @@ type ModuleListScreenProps<T extends ModuleRow> = {
   // The screen reloads when this changes, so a module that writes outside the
   // list can refresh the rows it just changed.
   refreshKey?: number;
+  // Where the search starts, both in the box and in the committed term. A
+  // module whose tabs unmount this screen uses it to bring the reader back to
+  // the search they left, or to the row a write just created.
+  initialSearch?: string;
+  // The committed term, so a screen that unmounts can hand its search back to
+  // whoever mounts it next.
+  onSearchCommit?: (term: string) => void;
 };
 
 function listCount(total: number, singular: string, plural: string): string {
@@ -125,10 +132,12 @@ export function ModuleListScreen<T extends ModuleRow>({
   rowActions,
   panel,
   refreshKey = 0,
+  initialSearch = '',
+  onSearchCommit,
 }: ModuleListScreenProps<T>) {
   const module = findModule(context, moduleCode);
-  const [draft, setDraft] = useState('');
-  const [term, setTerm] = useState('');
+  const [draft, setDraft] = useState(initialSearch);
+  const [term, setTerm] = useState(initialSearch);
   const [page, setPage] = useState(1);
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<ListState<T>>({ phase: 'loading' });
@@ -167,8 +176,10 @@ export function ModuleListScreen<T extends ModuleRow>({
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setTerm(draft.trim());
+    const next = draft.trim();
+    setTerm(next);
     setPage(1);
+    onSearchCommit?.(next);
   }
 
   return (

@@ -199,6 +199,37 @@ grant update (
   name, email, phone, role, is_primary
 ) on table public.client_contact to saas_runtime;
 
+-- The CRM lead surface. crm_lead is the first CRM-private table: unlike client
+-- and client_contact nothing outside CRM reads it, so it carries three
+-- restrictive module policies of its own (crm_read, crm_write_insert and
+-- crm_write_update, created in 0015_crm_leads.sql) beside the permissive
+-- tenant_isolation policy. A lead in an unentitled workspace is therefore
+-- stopped at the table, not only at the route. The column grants name exactly
+-- what each surface needs: there is no table-level privilege, no DELETE, and
+-- no grant on created_at or updated_at. converted_at is written by the convert
+-- route with now() and never read back, so it is updatable but not selectable.
+-- id and tenant_id are insertable because a new lead must
+-- state which row it is and which workspace owns it; both are deliberately
+-- absent from UPDATE, so no one can move a lead onto another identity or
+-- another tenant. stage is writable because the stage movement route names it;
+-- the stage check on the table and the terminality check beside it decide what
+-- a stage may be, not the grant. RLS remains the tenant and module boundary for
+-- every write; the table's stage check and terminality biconditional decide what
+-- a stage and its conversion columns may hold.
+grant select (
+  id, name, company, email, phone, source, stage, converted_client_id,
+  converted_contact_id
+) on table public.crm_lead to saas_runtime;
+
+grant insert (
+  id, tenant_id, name, company, email, phone, source, stage
+) on table public.crm_lead to saas_runtime;
+
+grant update (
+  name, company, email, phone, source, stage, converted_client_id,
+  converted_contact_id, converted_at
+) on table public.crm_lead to saas_runtime;
+
 -- Append-only audit writer. No SELECT, UPDATE or DELETE is granted.
 grant insert on table public.audit_event to saas_runtime;
 

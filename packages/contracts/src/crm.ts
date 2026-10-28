@@ -133,3 +133,110 @@ export type CrmContactUpdateInput = {
   role?: string | null;
   isPrimary?: boolean;
 };
+
+// One lead as the CRM lead surface returns it.
+//
+// A lead is CRM-private, not shared platform data: it carries the module
+// policies on its own table, and its item names exactly the nine fields the
+// surface reads. Tenant, timestamps and the conversion instant stay on the row.
+// The two conversion ids are null until the lead is converted, and are set
+// together with converted_at by the convert route.
+export type CrmLeadItem = {
+  id: string;
+  name: string;
+  company: string | null;
+  email: string | null;
+  phone: string | null;
+  source: string | null;
+  // The stored stage, exactly as the column holds it. The read does not map it
+  // to a label or derive a state from it.
+  stage: CrmLeadStage;
+  // The account and the contact a converted lead became. Both are null for a
+  // lead that is not converted, and the table's terminality check keeps them
+  // that way.
+  convertedAccountId: string | null;
+  convertedContactId: string | null;
+};
+
+export type CrmLeadListResponse = {
+  items: CrmLeadItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+};
+
+// The list input. The search term is a literal substring match over the name,
+// the company and the email: a percent sign or an underscore in it is text,
+// never a wildcard. The stage filter is an exact match on one stored stage.
+export type CrmLeadListInput = {
+  q?: string;
+  stage?: CrmLeadStage;
+  page?: number;
+  pageSize?: number;
+};
+
+// The five stages a lead may be stored in. A stage is exactly one of these
+// values and nothing else.
+export const CRM_LEAD_STAGES = [
+  'new',
+  'contacted',
+  'qualified',
+  'converted',
+  'disqualified',
+] as const;
+
+export type CrmLeadStage = (typeof CRM_LEAD_STAGES)[number];
+
+// The three stages a lead may be created in. 'converted' is reached only by the
+// conversion route, which writes the account, the contact and the instant
+// together; 'disqualified' is a decision about a lead that already exists, so a
+// new lead is never born terminal.
+export const CRM_LEAD_OPEN_STAGES = ['new', 'contacted', 'qualified'] as const;
+
+export type CrmLeadOpenStage = (typeof CRM_LEAD_OPEN_STAGES)[number];
+
+// A new lead. The body is closed: a key that is not named here is refused, so a
+// caller cannot smuggle a column the route never writes. name is required; the
+// other five fields are optional and stand empty when they are absent. stage
+// defaults to 'new' and may only name an open stage.
+export type CrmLeadCreateInput = {
+  name: string;
+  company?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  source?: string | null;
+  stage?: CrmLeadOpenStage;
+};
+
+// A change to an existing lead. At least one key must be present, and the
+// merged record is validated as a whole. Only company, email, phone and source
+// may be stated as null: name and stage are the two values a row always holds.
+// A stage of 'converted' is refused with its own answer, because conversion is
+// a separate route that writes more than one row; a change to a lead that has
+// already reached a terminal stage is refused as terminal.
+export type CrmLeadUpdateInput = {
+  name?: string;
+  company?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  source?: string | null;
+  stage?: CrmLeadStage;
+};
+
+// The conversion of one lead. currency is required and is a stored three-letter
+// code and nothing more: no registry resolves it, no rate converts it and no
+// jurisdiction is implied by it. accountName is optional and, when absent, the
+// account takes the lead's company, or its name when the company is empty.
+export type CrmLeadConversionInput = {
+  currency: string;
+  accountName?: string;
+};
+
+// The three rows a conversion wrote, read back in the same transaction. The
+// lead is the converted lead, and the account and the contact are the shared
+// records it became.
+export type CrmLeadConversionResponse = {
+  lead: CrmLeadItem;
+  account: CrmAccountListItem;
+  contact: CrmContactItem;
+};

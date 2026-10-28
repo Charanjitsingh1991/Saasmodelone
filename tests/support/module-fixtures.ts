@@ -223,6 +223,70 @@ export async function insertContactRow(
   return row;
 }
 
+export type LeadRowFixture = {
+  id: string;
+  name: string;
+  company: string | null;
+  email: string | null;
+  phone: string | null;
+  source: string | null;
+  stage: string;
+  convertedAccountId: string | null;
+  convertedContactId: string | null;
+};
+
+// A converted lead carries all three conversion columns, because the table's
+// terminality check refuses any other combination. The fixture states them
+// together rather than leaving the caller to remember the rule.
+export async function insertLeadRow(
+  client: Client,
+  tenantId: string,
+  input: {
+    name: string;
+    company?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    source?: string | null;
+    stage?: string;
+    convertedAccountId?: string | null;
+    convertedContactId?: string | null;
+    convertedAt?: string | null;
+  },
+): Promise<LeadRowFixture> {
+  const result = await client.query<LeadRowFixture>(
+    `insert into crm_lead
+       (tenant_id, name, company, email, phone, source, stage,
+        converted_client_id, converted_contact_id, converted_at)
+     values ($1, $2, $3, $4::citext, $5, $6, $7, $8, $9, $10::timestamptz)
+     returning id,
+               name,
+               company,
+               email::text as email,
+               phone,
+               source,
+               stage,
+               converted_client_id as "convertedAccountId",
+               converted_contact_id as "convertedContactId"`,
+    [
+      tenantId,
+      input.name,
+      input.company ?? null,
+      input.email ?? null,
+      input.phone ?? null,
+      input.source ?? null,
+      input.stage ?? 'new',
+      input.convertedAccountId ?? null,
+      input.convertedContactId ?? null,
+      input.convertedAt ? utcInstant(input.convertedAt) : null,
+    ],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error(`Could not create the lead ${input.name}`);
+  }
+  return row;
+}
+
 export type ProjectInput = {
   clientId: string;
   name: string;

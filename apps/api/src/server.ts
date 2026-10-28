@@ -10,6 +10,8 @@ import {
   CONTENT_LIST_MAX_PAGE_SIZE,
   CONTENT_SEARCH_MAX_LENGTH,
   CRM_ACCOUNT_STATUSES,
+  CRM_LEAD_OPEN_STAGES,
+  CRM_LEAD_STAGES,
   CRM_LIST_DEFAULT_PAGE_SIZE,
   CRM_LIST_MAX_PAGE_SIZE,
   CRM_PAYMENT_TERMS_DAYS_MAX,
@@ -42,6 +44,10 @@ import {
   type CrmAccountListResponse,
   type CrmContactItem,
   type CrmContactListResponse,
+  type CrmLeadConversionResponse,
+  type CrmLeadItem,
+  type CrmLeadListResponse,
+  type CrmLeadStage,
   type EmploymentItem,
   type EmploymentListResponse,
   type EmploymentStatus,
@@ -1569,6 +1575,241 @@ function checkCrmAccountValues(values: CrmAccountValues): void {
   }
   crmAccountCurrency(values.currency);
   crmAccountPaymentTermsDays(values.paymentTermsDays);
+}
+
+// ---------------------------------------------------------------------------
+// The CRM lead surface.
+//
+// A lead is CRM-private: nothing outside this module reads or writes one, so
+// crm_lead carries restrictive crm_read and crm_write_* policies of its own
+// (0015_crm_leads.sql), and an unentitled workspace is stopped at the table as
+// well as at the route. The select names the nine fields the surface returns
+// and nothing else; the conversion instant stays on the row.
+// ---------------------------------------------------------------------------
+
+const CRM_LEAD_SELECT = `select l.id,
+                    l.name,
+                    l.company,
+                    l.email::text as email,
+                    l.phone,
+                    l.source,
+                    l.stage,
+                    l.converted_client_id,
+                    l.converted_contact_id`;
+
+const CRM_LEAD_FROM = 'from crm_lead l';
+
+type CrmLeadRow = {
+  id: string;
+  name: string;
+  company: string | null;
+  email: string | null;
+  phone: string | null;
+  source: string | null;
+  stage: string;
+  converted_client_id: string | null;
+  converted_contact_id: string | null;
+};
+
+function crmLeadItemFromRow(row: CrmLeadRow): CrmLeadItem {
+  return {
+    id: row.id,
+    name: row.name,
+    company: row.company,
+    email: row.email,
+    phone: row.phone,
+    source: row.source,
+    stage: row.stage as CrmLeadStage,
+    convertedAccountId: row.converted_client_id,
+    convertedContactId: row.converted_contact_id,
+  };
+}
+
+// The six fields a lead write may name. The body is closed: a key that is not
+// on this list is refused, so a caller cannot reach a column the route never
+// writes - and in particular cannot name converted_client_id, converted_at or
+// tenant_id, which only the conversion route and the session may set.
+const CRM_LEAD_WRITE_FIELDS = [
+  'name',
+  'company',
+  'email',
+  'phone',
+  'source',
+  'stage',
+] as const;
+
+type CrmLeadWriteField = (typeof CRM_LEAD_WRITE_FIELDS)[number];
+
+const CRM_LEAD_COLUMNS: Record<CrmLeadWriteField, string> = {
+  name: 'name',
+  company: 'company',
+  email: 'email',
+  phone: 'phone',
+  source: 'source',
+  stage: 'stage',
+};
+
+// The six values of one lead, always complete. The patch route fills the gaps
+// from the stored row, so both routes decide the table's invariants over one
+// shape rather than over a half-supplied one.
+type CrmLeadValues = {
+  name: string;
+  company: string | null;
+  email: string | null;
+  phone: string | null;
+  source: string | null;
+  stage: CrmLeadStage;
+};
+
+type CrmLeadWriteParse = {
+  // Field names the caller actually sent, so the audit can record which
+  // fields were written without recording any of their values.
+  present: CrmLeadWriteField[];
+  // Trimmed values. A blank or null optional field is null; an absent field is
+  // undefined, which the patch route reads as "unchanged".
+  values: Partial<CrmLeadValues>;
+};
+
+// One parser for both writes: create requires a name and may only name an open
+// stage; patch takes any non-empty subset of the six and validates the merged
+// record afterwards. 'converted' is a valid patch value at this layer and is
+// refused by the route with its own answer, because conversion writes more
+// than the lead row.
+function parseCrmLeadWrite(
+  body: Record<string, unknown>,
+  mode: 'create' | 'patch',
+): CrmLeadWriteParse {
+  for (const key of Object.keys(body)) {
+    if (!(CRM_LEAD_WRITE_FIELDS as readonly string[]).includes(key)) {
+      throw new ApiError(400, 'INVALID_BODY');
+    }
+  }
+
+  const present: CrmLeadWriteField[] = [];
+  const values: Partial<CrmLeadValues> = {};
+
+  for (const field of CRM_LEAD_WRITE_FIELDS) {
+    if (!Object.hasOwn(body, field)) {
+      continue;
+    }
+    const raw = body[field];
+    present.push(field);
+
+    if (field === 'name') {
+      if (typeof raw !== 'string' || raw.trim() === '') {
+        throw new ApiError(400, 'INVALID_BODY');
+      }
+      values.name = raw.trim();
+      continue;
+    }
+
+    if (field === 'stage') {
+      const allowed: readonly string[] =
+        mode === 'create' ? CRM_LEAD_OPEN_STAGES : CRM_LEAD_STAGES;
+      if (typeof raw !== 'string' || !allowed.includes(raw)) {
+        throw new ApiError(400, 'INVALID_BODY');
+      }
+      values.stage = raw as CrmLeadStage;
+      continue;
+    }
+
+    // company, email, phone and source: a blank or null clears them.
+    if (raw !== null && typeof raw !== 'string') {
+      throw new ApiError(400, 'INVALID_BODY');
+    }
+    const trimmed = typeof raw === 'string' ? raw.trim() : '';
+    values[field] = trimmed === '' ? null : trimmed;
+  }
+
+  if (mode === 'create' && values.name === undefined) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  if (present.length === 0) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  return { present, values };
+}
+
+// The merged record, always complete. The two values that may not stand empty
+// are checked again over the merged shape, so a patch cannot build a record
+// the create path would have refused.
+function checkCrmLeadValues(values: CrmLeadValues): void {
+  if (values.name.trim() === '') {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  if (!(CRM_LEAD_STAGES as readonly string[]).includes(values.stage)) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+}
+
+// The stage filter is an exact match on one stored stage. Anything else - a
+// partial name, a case variant, a repeated parameter - is a client error
+// rather than a filter that quietly matches nothing.
+function crmLeadStageFilter(query: Record<string, unknown>): CrmLeadStage | null {
+  const raw = queryStringParam(query, 'stage');
+  if (raw === null) {
+    return null;
+  }
+  if (!(CRM_LEAD_STAGES as readonly string[]).includes(raw)) {
+    throw new ApiError(400, 'INVALID_QUERY');
+  }
+  return raw as CrmLeadStage;
+}
+
+// One answer for every way a lead id can fail to name a lead in this tenant:
+// malformed, unknown, or another tenant's.
+//
+// A write path asks for the row lock. Two transactions that both read a lead
+// before either writes it would each believe the stage they read, so a stage
+// move could land on a lead a conversion had just made final. With the lock,
+// the second transaction reads the committed row after the first commits and
+// answers from it.
+async function requireCrmLead(
+  client: PoolClient,
+  leadId: unknown,
+  forUpdate = false,
+): Promise<CrmLeadRow> {
+  if (typeof leadId !== 'string' || !UUID_TEXT_PATTERN.test(leadId)) {
+    throw new ApiError(404, 'LEAD_NOT_FOUND');
+  }
+  const lead = await client.query<CrmLeadRow>(
+    `${CRM_LEAD_SELECT}
+      ${CRM_LEAD_FROM}
+      where l.id = $1${forUpdate ? ' for update' : ''}`,
+    [leadId],
+  );
+  const row = lead.rows[0];
+  if (!row) {
+    throw new ApiError(404, 'LEAD_NOT_FOUND');
+  }
+  return row;
+}
+
+// The conversion body: a currency the caller must state and an account name
+// the caller may state. The currency is the same three-letter code the account
+// route takes, because the account this writes stores it; nothing here converts
+// one currency into another. An absent or blank name means "take the lead's
+// company, then the lead's name", so the route decides the name from the row it
+// locked rather than from a value the caller invented.
+function parseCrmLeadConversion(body: Record<string, unknown>): {
+  currency: string;
+  accountName: string | null;
+} {
+  for (const key of Object.keys(body)) {
+    if (key !== 'currency' && key !== 'accountName') {
+      throw new ApiError(400, 'INVALID_BODY');
+    }
+  }
+
+  const currency = crmAccountCurrency(body.currency);
+
+  const raw = body.accountName;
+  if (raw !== undefined && raw !== null && typeof raw !== 'string') {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+
+  return { currency, accountName: trimmed === '' ? null : trimmed };
 }
 
 function validateRateLimit(options: RateLimitOptions, name: string): RateLimitOptions {
@@ -4119,6 +4360,450 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
           return crmContactItemFromRow(row);
         },
       );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  // The CRM lead read surface. A CRM-private row: the route gate and the
+  // restrictive crm_read policy both have to allow it.
+  app.get('/v1/crm/leads', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+
+    const query = request.query as Record<string, unknown>;
+    const searchTerm = listSearchTerm(query, CRM_SEARCH_MAX_LENGTH);
+    const stage = crmLeadStageFilter(query);
+    const page = listIntegerParam(query, 'page', 1, LIST_MAX_PAGE);
+    const pageSize = listIntegerParam(
+      query,
+      'pageSize',
+      CRM_LIST_DEFAULT_PAGE_SIZE,
+      CRM_LIST_MAX_PAGE_SIZE,
+    );
+
+    try {
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'crm', operation: 'read' },
+        },
+        async (client) => {
+          const clauses: string[] = [];
+          const filterValues: string[] = [];
+          if (searchTerm !== '') {
+            filterValues.push(searchTerm);
+            const needle = `$${filterValues.length}`;
+            // strpos over the lowered columns is a literal match, so a search
+            // for "%" or "_" cannot behave like a LIKE wildcard.
+            clauses.push(
+              `(strpos(lower(l.name), lower(${needle})) > 0
+                 or strpos(lower(coalesce(l.company, '')), lower(${needle})) > 0
+                 or strpos(lower(coalesce(l.email::text, '')), lower(${needle})) > 0)`,
+            );
+          }
+          if (stage !== null) {
+            filterValues.push(stage);
+            clauses.push(`l.stage = $${filterValues.length}`);
+          }
+          const where = clauses.length === 0 ? 'true' : clauses.join(' and ');
+          const limitIndex = filterValues.length + 1;
+
+          const matching = await client.query<{ total: string }>(
+            `select count(*) as total ${CRM_LEAD_FROM} where ${where}`,
+            filterValues,
+          );
+          const pageRows = await client.query<CrmLeadRow>(
+            `${CRM_LEAD_SELECT}
+              ${CRM_LEAD_FROM}
+              where ${where}
+              order by l.stage, lower(l.name), l.id
+              limit $${limitIndex} offset $${limitIndex + 1}`,
+            [...filterValues, pageSize, (page - 1) * pageSize],
+          );
+
+          const body: CrmLeadListResponse = {
+            items: pageRows.rows.map(crmLeadItemFromRow),
+            total: Number(matching.rows[0]?.total ?? '0'),
+            page,
+            pageSize,
+          };
+          return body;
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  // The CRM lead intake. One gate, one explicit column list, one read-back.
+  app.post('/v1/crm/leads', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+    requireCsrfToken(session, request);
+
+    try {
+      const item = await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'crm', operation: 'write' },
+        },
+        async (client) => {
+          // Only now is the body read. A caller who may not write learns
+          // nothing about what a valid lead looks like from the order of the
+          // refusals.
+          const parsed = parseCrmLeadWrite(peopleWriteObject(request.body), 'create');
+
+          // The column list is the reviewed one; the body chooses only whether
+          // stage is named at all, and an absent stage takes the database's
+          // own 'new' default. The conversion columns are never named here: a
+          // lead is born unconverted.
+          const columns = [
+            'id',
+            'tenant_id',
+            'name',
+            'company',
+            'email',
+            'phone',
+            'source',
+          ];
+          const expressions = [
+            '$1',
+            'app.current_tenant_id()',
+            '$2',
+            '$3',
+            '$4::citext',
+            '$5',
+            '$6',
+          ];
+          const bound: unknown[] = [
+            randomUUID(),
+            parsed.values.name as string,
+            parsed.values.company ?? null,
+            parsed.values.email ?? null,
+            parsed.values.phone ?? null,
+            parsed.values.source ?? null,
+          ];
+
+          if (parsed.values.stage !== undefined) {
+            columns.push('stage');
+            expressions.push(`$${bound.length + 1}`);
+            bound.push(parsed.values.stage);
+          }
+
+          const id = bound[0] as string;
+
+          await client.query(
+            `insert into crm_lead (${columns.join(', ')})
+             values (${expressions.join(', ')})`,
+            bound,
+          );
+
+          // The answer is the read-back, from the same select fragment the
+          // list uses, so a write answer and a list answer cannot diverge.
+          const created = await client.query<CrmLeadRow>(
+            `${CRM_LEAD_SELECT}
+              ${CRM_LEAD_FROM}
+              where l.id = $1`,
+            [id],
+          );
+          const row = created.rows[0];
+          if (!row) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          await appendAuditEvent(client, {
+            action: 'crm.lead.created',
+            entityType: 'crm_lead',
+            entityId: id,
+            actorType: 'user',
+            actorUserId: session.userId,
+            // Field names and nothing else: the name, the company, the email,
+            // the phone and the source stay on the row, and an audit trail
+            // that copied them into metadata would be a second place to read
+            // them from.
+            metadata: { fields: [...parsed.present].sort() },
+            ip: request.ip,
+            userAgent: request.headers['user-agent'] ?? null,
+          });
+
+          return crmLeadItemFromRow(row);
+        },
+      );
+
+      reply.code(201);
+      return item;
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  // The CRM lead stage movement. The table's policies and terminality check
+  // still apply; this route is where the two application rules live. An open
+  // lead may move among the open stages or be disqualified. A converted lead is
+  // reached only through the conversion route, and a lead that has reached
+  // either terminal stage can no longer change.
+  app.patch('/v1/crm/leads/:id', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+    requireCsrfToken(session, request);
+
+    const leadId = (request.params as { id?: unknown }).id;
+
+    try {
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'crm', operation: 'write' },
+        },
+        async (client) => {
+          const currentRow = await requireCrmLead(client, leadId, true);
+          const currentItem = crmLeadItemFromRow(currentRow);
+
+          const parsed = parseCrmLeadWrite(peopleWriteObject(request.body), 'patch');
+
+          // An absent key keeps the stored value; a present one states it.
+          const values: CrmLeadValues = {
+            name: parsed.values.name ?? currentItem.name,
+            company: Object.hasOwn(parsed.values, 'company')
+              ? parsed.values.company ?? null
+              : currentItem.company,
+            email: Object.hasOwn(parsed.values, 'email')
+              ? parsed.values.email ?? null
+              : currentItem.email,
+            phone: Object.hasOwn(parsed.values, 'phone')
+              ? parsed.values.phone ?? null
+              : currentItem.phone,
+            source: Object.hasOwn(parsed.values, 'source')
+              ? parsed.values.source ?? null
+              : currentItem.source,
+            stage: parsed.values.stage ?? currentItem.stage,
+          };
+          checkCrmLeadValues(values);
+
+          const changed = CRM_LEAD_WRITE_FIELDS.filter(
+            (field) => values[field] !== currentItem[field],
+          ).sort();
+
+          if (changed.length === 0) {
+            // Nothing moved: no UPDATE, no audit row, and the stored row
+            // answers. A terminal lead can be re-read this way; it cannot be
+            // changed.
+            return currentItem;
+          }
+
+          if (
+            currentItem.stage === 'converted' ||
+            currentItem.stage === 'disqualified'
+          ) {
+            throw new ApiError(409, 'LEAD_TERMINAL');
+          }
+
+          // 'converted' is not a stage this route writes. Conversion writes an
+          // account and a contact as well, and that is one transaction of its
+          // own, reached through the convert route.
+          if (values.stage === 'converted') {
+            throw new ApiError(409, 'LEAD_CONVERSION_REQUIRED');
+          }
+
+          const setValues: unknown[] = [];
+          const assignments = changed.map((field) => {
+            setValues.push(values[field]);
+            return `${CRM_LEAD_COLUMNS[field]} = $${setValues.length}`;
+          });
+
+          const updated = await client.query(
+            `update crm_lead
+                set ${assignments.join(', ')}
+              where id = $${setValues.length + 1}`,
+            [...setValues, currentItem.id],
+          );
+          // One row or none: a statement that succeeded but matched nothing
+          // would mean a policy moved under the transaction, so the write and
+          // its audit row both roll back to a sanitized 500.
+          if (updated.rowCount !== 1) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          const written = await client.query<CrmLeadRow>(
+            `${CRM_LEAD_SELECT}
+              ${CRM_LEAD_FROM}
+              where l.id = $1`,
+            [currentItem.id],
+          );
+          const row = written.rows[0];
+          if (!row) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          await appendAuditEvent(client, {
+            action: 'crm.lead.updated',
+            entityType: 'crm_lead',
+            entityId: currentItem.id,
+            actorType: 'user',
+            actorUserId: session.userId,
+            // The changed field names only. No before or after value of any
+            // field is recorded here.
+            metadata: { fields: changed },
+            ip: request.ip,
+            userAgent: request.headers['user-agent'] ?? null,
+          });
+
+          return crmLeadItemFromRow(row);
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  // The CRM lead conversion. One transaction writes three rows: the account the
+  // lead became, its primary contact and the lead's own terminal state. Either
+  // all three exist or none does, so a failure between them cannot leave a lead
+  // marked converted with no account, or an account with no lead that explains
+  // it.
+  //
+  // The lead is read under its row lock before anything is inserted. Two
+  // conversions of the same lead therefore serialize, and the second reads the
+  // committed 'converted' row and is answered 409 with nothing written.
+  app.post('/v1/crm/leads/:id/convert', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+    requireCsrfToken(session, request);
+
+    const leadId = (request.params as { id?: unknown }).id;
+
+    try {
+      const conversion = await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'crm', operation: 'write' },
+        },
+        async (client): Promise<CrmLeadConversionResponse> => {
+          const leadRow = await requireCrmLead(client, leadId, true);
+          const lead = crmLeadItemFromRow(leadRow);
+
+          // The body is read after the gate and after the lead is known, so a
+          // caller who may not write learns nothing about a valid body, and a
+          // caller who names no lead of this tenant gets the 404 rather than a
+          // verdict on the body.
+          const parsed = parseCrmLeadConversion(peopleWriteObject(request.body));
+
+          if (lead.stage === 'converted') {
+            throw new ApiError(409, 'LEAD_ALREADY_CONVERTED');
+          }
+          if (lead.stage === 'disqualified') {
+            throw new ApiError(409, 'LEAD_TERMINAL');
+          }
+
+          // The account is a shared client record: no code is set, the status
+          // and the payment terms take the database's defaults, and the
+          // currency is the code the caller stated. The billing email and the
+          // phone are the lead's own contact details, copied once at the moment
+          // the lead becomes an account.
+          const accountId = randomUUID();
+          const accountName = parsed.accountName ?? lead.company ?? lead.name;
+          await client.query(
+            `insert into client
+               (id, tenant_id, name, billing_email, phone, currency)
+             values ($1, app.current_tenant_id(), $2, $3, $4, $5)`,
+            [accountId, accountName, lead.email, lead.phone, parsed.currency],
+          );
+
+          // The contact is the person the lead named, and the account has no
+          // other contact, so it is primary by construction.
+          const contactId = randomUUID();
+          await client.query(
+            `insert into client_contact
+               (id, tenant_id, client_id, name, email, phone, is_primary)
+             values ($1, app.current_tenant_id(), $2, $3, $4, $5, true)`,
+            [contactId, accountId, lead.name, lead.email, lead.phone],
+          );
+
+          // One statement states the whole terminal state, so the table's
+          // terminality check sees the stage and both ids in the same row
+          // version.
+          const converted = await client.query(
+            `update crm_lead
+                set stage = 'converted',
+                    converted_client_id = $1,
+                    converted_contact_id = $2,
+                    converted_at = now()
+              where id = $3`,
+            [accountId, contactId, lead.id],
+          );
+          if (converted.rowCount !== 1) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          // All three rows are read back through the fragments their own
+          // surfaces use, so a conversion answer and a list answer cannot
+          // diverge.
+          const leadRead = await client.query<CrmLeadRow>(
+            `${CRM_LEAD_SELECT}
+              ${CRM_LEAD_FROM}
+              where l.id = $1`,
+            [lead.id],
+          );
+          const accountRead = await client.query<CrmAccountRow>(
+            `${CRM_ACCOUNT_SELECT}
+              ${CRM_ACCOUNT_FROM}
+              where c.id = $1`,
+            [accountId],
+          );
+          const contactRead = await client.query<CrmContactRow>(
+            `${CRM_CONTACT_SELECT}
+              ${CRM_CONTACT_FROM}
+              where ct.id = $1`,
+            [contactId],
+          );
+          const writtenLead = leadRead.rows[0];
+          const writtenAccount = accountRead.rows[0];
+          const writtenContact = contactRead.rows[0];
+          if (!writtenLead || !writtenAccount || !writtenContact) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          await appendAuditEvent(client, {
+            action: 'crm.lead.converted',
+            entityType: 'crm_lead',
+            entityId: lead.id,
+            actorType: 'user',
+            actorUserId: session.userId,
+            // The field names the conversion set, and nothing else: no name,
+            // email, phone, currency or id is copied into the trail.
+            metadata: {
+              fields: ['convertedAccountId', 'convertedContactId', 'stage'],
+            },
+            ip: request.ip,
+            userAgent: request.headers['user-agent'] ?? null,
+          });
+
+          return {
+            lead: crmLeadItemFromRow(writtenLead),
+            account: crmAccountItemFromRow(writtenAccount),
+            contact: crmContactItemFromRow(writtenContact),
+          };
+        },
+      );
+
+      return conversion;
     } catch (error) {
       return await accessError(pool, error, request, reply, session);
     }

@@ -2203,7 +2203,7 @@ describe('The compensation write in the database', () => {
 });
 
 describe('Compensation write inventory', () => {
-  test('lands the fourteenth migration and no other ledger change', async () => {
+  test('lands the fourteenth migration and leaves the later CRM file at the ledger end', async () => {
     const ledger = await withOwner(async (client) => {
       const result = await client.query<{ version: string; status: string }>(
         `select version, status from infra.schema_migration
@@ -2213,10 +2213,15 @@ describe('Compensation write inventory', () => {
       return result.rows;
     });
 
-    expect(ledger).toHaveLength(14);
+    // Fifteen versions are applied. 0014 is the fourteenth; 0015_crm_leads.sql
+    // belongs to the CRM lead slice and changes nothing in this module. The
+    // fifteen-version ledger is pinned here as well, so a migration that slipped
+    // in without a doc change would fail a compensation suite.
+    expect(ledger).toHaveLength(15);
     expect(ledger.every((row) => row.status === 'applied')).toBe(true);
     expect(ledger[0]?.version).toBe('0001_core.sql');
-    expect(ledger[ledger.length - 1]?.version).toBe('0014_compensation_write.sql');
+    expect(ledger[13]?.version).toBe('0014_compensation_write.sql');
+    expect(ledger[14]?.version).toBe('0015_crm_leads.sql');
   });
 
   test('adds two restrictive write policies, no delete policy, and leaves the read alone', async () => {

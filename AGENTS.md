@@ -54,25 +54,36 @@ All five modules are being built now, by the owner's decision of 27 October
 and one gate run. This is a departure from the sequencing rule in
 suite/docs/roadmap.md, which is amended and dated there rather than deleted.
 The standalone-CRM thesis survives as a requirement on the CRM slice, and
-Batch 2 carries that proof: a CRM-only tenant with no People entitlement
-manages accounts and contacts without reaching into a module it does not hold.
+Batches 2 and 3 carry that proof: a CRM-only tenant with no People entitlement
+manages accounts, contacts and leads without reaching into a module it does not
+hold.
 
-State as of this batch (Batch 2 - standalone CRM accounts and contacts, suite/docs/adr/0014-crm-accounts-contacts.md):
+State as of this batch (Batch 3 - CRM leads, stage movement and conversion, suite/docs/adr/0015-crm-leads-pipeline.md):
 
 - **M0 has not exited.** No batch exits it on its own, and nothing in this
   repository may claim it has.
 - **CRM ships accounts and contacts on the shared `client` and `client_contact`
-  rows.** There is no CRM-specific table and this batch added no migration, no
-  policy and no table grant. CRM is a module that reads and writes the shared
-  client records behind its own module gate.
-- **CRM is a preview module with a read surface and a write surface** - GET,
-  POST and PATCH /v1/crm/accounts, and GET, POST and PATCH
-  /v1/crm/accounts/:accountId/contacts, plus the accounts screen and its
-  contacts panel. Leads, pipeline, activities, forecast and export are not
-  built, so the CRM module is not complete and the standalone sale is not
-  ready: the export and the lead-to-pipeline path remain unbuilt. There is no
-  contact delete, because the shared client_contact table has no soft-delete
-  column and the runtime holds no DELETE privilege on it.
+  rows, and leads on `crm_lead`.** `crm_lead` is the first table this product
+  owns for one module only: 0015 gives it three restrictive policies -
+  `crm_read`, `crm_write_insert`, `crm_write_update` - that the module policy
+  installer cannot drop, no delete policy, and 26 column privileges over nine
+  columns with no table-level privilege and no DELETE. Accounts and contacts
+  remain shared rows with no CRM module policy. CRM has no scope: a member
+  holding `crm.write` may change every lead in the tenant.
+- **CRM is a preview module with read and write surfaces** - GET, POST and
+  PATCH /v1/crm/accounts, GET and POST and PATCH
+  /v1/crm/accounts/:accountId/contacts, and GET and POST /v1/crm/leads,
+  PATCH /v1/crm/leads/:id and POST /v1/crm/leads/:id/convert, plus the accounts
+  screen, its contacts panel and the Accounts | Leads tab strip. A lead is
+  admitted only on an open stage, a converted or disqualified lead cannot
+  change, and conversion writes a shared account, its primary contact and the
+  terminal lead in one transaction. Pipeline analytics, activities, forecast
+  and export are not built, so the CRM module is not complete and the
+  standalone sale is not ready. There is no lead delete or re-open and no
+  contact delete, because neither table has a soft-delete column and the
+  runtime holds no DELETE privilege on either.
+- **No new permission in Batch 3.** The published permission set stays at nine
+  names; every lead route asks `crm.read` or `crm.write`.
 - **Work, Money and Content have read surfaces only** - GET /v1/work/projects,
   GET /v1/money/invoices and GET /v1/content/items, plus three read-only
   screens. There is no write surface in any of those three modules.

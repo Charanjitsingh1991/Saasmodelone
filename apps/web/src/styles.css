@@ -900,9 +900,12 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
   letter-spacing: -0.01em;
 }
 
+/* A cell wraps between words. A token that has no break opportunity of its own,
+   such as a long email address, widens its column instead of being cut in the
+   middle, and .directory-scroll carries the surplus sideways. */
 .directory-table td {
   color: var(--ink-soft);
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
 }
 
 /* Edit and Place share one cell. They wrap inside it instead of widening the
@@ -1142,6 +1145,75 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
   margin-top: 18px;
 }
 
+/* CRM tabs. The module route holds two views, so the switch sits above the page
+   header as a segmented control: it changes the view inside one route and never
+   the route itself. */
+
+.crm-view {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(22px, 3vw, 34px);
+}
+
+.crm-tabs {
+  align-self: flex-start;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--paper-raised);
+}
+
+.crm-tab {
+  min-height: 38px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+  font-weight: 640;
+  cursor: pointer;
+}
+
+.crm-tab:hover {
+  color: var(--ink);
+}
+
+.crm-tab[aria-selected='true'] {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+/* The stage filter is one exact stored stage, so it is a picker beside the
+   search rather than a term typed into it. It keeps .searchbox's height and
+   border and asks for a narrower share of the row. */
+.crm-stage-filter {
+  flex: 0 1 190px;
+  min-width: 150px;
+}
+
+/* A row's stage control is a picker, not a form field: it sits in the cell at
+   the size of the text around it. A converted or disqualified row shows its
+   stage as plain text instead, because that stage is final. */
+.stage-select {
+  min-height: 34px;
+  padding: 0 28px 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 0.86rem;
+  font-weight: 620;
+}
+
+.stage-select:disabled {
+  color: var(--ink-faint);
+  background: var(--paper-raised);
+}
+
 .panel-state {
   max-width: 660px;
   padding-top: clamp(30px, 7vw, 80px);
@@ -1352,6 +1424,20 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
   }
 
   .searchbox {
+    flex: 1 1 auto;
+  }
+
+  .crm-tabs {
+    display: flex;
+    width: 100%;
+  }
+
+  .crm-tab {
+    flex: 1 1 0;
+    padding: 0 12px;
+  }
+
+  .crm-stage-filter {
     flex: 1 1 auto;
   }
 

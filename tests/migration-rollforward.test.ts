@@ -337,12 +337,13 @@ afterAll(async () => {
 
 describe('migration roll-forward over populated data', () => {
   test('applies only the newest file while the earlier ones are skipped by checksum', () => {
-    expect(allFiles).toHaveLength(14);
-    expect(newestFile).toBe('0014_compensation_write.sql');
-    expect(previousFiles).toHaveLength(13);
+    expect(allFiles).toHaveLength(15);
+    expect(newestFile).toBe('0015_crm_leads.sql');
+    expect(previousFiles).toHaveLength(14);
     expect(previousFiles).toContain('0011_outbox.sql');
     expect(previousFiles).toContain('0012_people_scope.sql');
     expect(previousFiles).toContain('0013_compensation_read.sql');
+    expect(previousFiles).toContain('0014_compensation_write.sql');
     expect(upgraded().applied).toEqual([newestFile]);
     expect(upgraded().skipped).toEqual(previousFiles);
   });
@@ -368,6 +369,42 @@ describe('migration roll-forward over populated data', () => {
         .update(await readFile(path.join(migrationsDir, String(newestFile))))
         .digest('hex');
       expect(ledger.rows.find((row) => row.version === newestFile)?.checksum).toBe(expected);
+    } finally {
+      await client.end();
+    }
+  });
+
+  test('creates the CRM lead table on the upgraded database', async () => {
+    const client = await ownerClient();
+    try {
+      const table = await client.query<{ rls: boolean; policies: string[] }>(`
+        select c.relrowsecurity as rls,
+               coalesce((
+                 select array_agg(p.polname::text order by p.polname)::text[]
+                   from pg_policy p
+                  where p.polrelid = c.oid
+               ), '{}'::text[]) as policies
+          from pg_class c
+          join pg_namespace n on n.oid = c.relnamespace
+         where n.nspname = 'public' and c.relname = 'crm_lead'
+      `);
+      expect(table.rows).toEqual([
+        {
+          rls: true,
+          policies: [
+            'crm_read',
+            'crm_write_insert',
+            'crm_write_update',
+            'tenant_isolation',
+          ],
+        },
+      ]);
+
+      // The upgrade creates the table empty: 0015 adds no row and no backfill.
+      const rows = await client.query<{ total: string }>(
+        'select count(*)::text as total from crm_lead',
+      );
+      expect(rows.rows[0]?.total).toBe('0');
     } finally {
       await client.end();
     }
@@ -660,12 +697,12 @@ describe('migration roll-forward over populated data', () => {
       expect(policies.rows).toHaveLength(8);
       expect(policies.rows.every((row) => row.permissive === false)).toBe(true);
 
-      // 0014_compensation_write.sql is the file this roll-forward actually applies,
-      // so the same proof covers it: over a database that already holds salary
-      // rows, the 0013 read policy is untouched and the two write policies land
-      // restrictive, each naming the write oracle rather than the read one, with
-      // the update carrying a WITH CHECK as well as a USING. There is still no
-      // delete policy, because there is still no delete privilege.
+      // The pre-upgrade set already carries 0014's write half, and 0015 applies
+      // over it without touching compensation: the 0013 read policy is still
+      // there and the two write policies still land restrictive, each naming the
+      // write oracle rather than the read one, with the update carrying a WITH
+      // CHECK as well as a USING. There is still no delete policy, because there
+      // is still no delete privilege.
       const compensation = await client.query<{
         table_name: string;
         polname: string;

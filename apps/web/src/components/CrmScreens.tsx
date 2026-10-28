@@ -16,6 +16,7 @@ import {
 } from '@saasmodels/contracts';
 import { api, type ApiResult } from '../api';
 import { findModule } from '../lib/model';
+import { CrmLeadsScreen } from './CrmLeadScreens';
 import { ModuleListScreen, type Column } from './ModuleScreens';
 
 type CrmListResponse<T> = {
@@ -691,7 +692,23 @@ function CrmContactsPanel({
 // owns client identity and this is the module that reads and writes it. The
 // screen says so in its note, because a member who also holds Work or Money
 // will see the same account named in two places.
-export function CrmScreen({ context }: { context: ContextResponse }) {
+//
+// The tabs above this screen own which view is mounted, so switching to Leads
+// unmounts it. The account search and any message a conversion left behind are
+// handed back in, which is what lets a conversion land on the account it wrote.
+type CrmAccountsScreenProps = {
+  context: ContextResponse;
+  initialSearch?: string;
+  initialMessage?: string | null;
+  onSearchCommit?: (term: string) => void;
+};
+
+function CrmAccountsScreen({
+  context,
+  initialSearch,
+  initialMessage = null,
+  onSearchCommit,
+}: CrmAccountsScreenProps) {
   const module = findModule(context, 'crm');
   // The write controls appear only for a member whose own context says they
   // may write. The server checks the same permission on every request, so a
@@ -703,7 +720,9 @@ export function CrmScreen({ context }: { context: ContextResponse }) {
   const [values, setValues] = useState<AccountFormValues>(EMPTY_ACCOUNT_FORM);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [savedMessage, setSavedMessage] = useState<string | null>(null);
+  // One success slot for the whole screen: an account write and a contact write
+  // never stack two confirmations above each other.
+  const [savedMessage, setSavedMessage] = useState<string | null>(initialMessage);
   const [revision, setRevision] = useState(0);
 
   // The account whose contacts are open. One at a time: the panel below the
@@ -722,7 +741,6 @@ export function CrmScreen({ context }: { context: ContextResponse }) {
   );
   const [contactSubmitting, setContactSubmitting] = useState(false);
   const [contactError, setContactError] = useState<string | null>(null);
-  const [contactSaved, setContactSaved] = useState<string | null>(null);
 
   // The contacts are read on their own route, so the panel carries its own
   // loading, error and empty states instead of the account list's.
@@ -804,7 +822,7 @@ export function CrmScreen({ context }: { context: ContextResponse }) {
   }
 
   function openContacts(account: CrmAccountListItem) {
-    setContactSaved(null);
+    setSavedMessage(null);
     setContactError(null);
     setContactForm(null);
     setOpenAccount(account);
@@ -815,14 +833,14 @@ export function CrmScreen({ context }: { context: ContextResponse }) {
   }
 
   function openContactCreate() {
-    setContactSaved(null);
+    setSavedMessage(null);
     setContactError(null);
     setContactValues(EMPTY_CONTACT_FORM);
     setContactForm({ mode: 'create' });
   }
 
   function openContactEdit(contact: CrmContactItem) {
-    setContactSaved(null);
+    setSavedMessage(null);
     setContactError(null);
     setContactValues(formValuesFromContact(contact));
     setContactForm({ mode: 'update', contact });
@@ -866,7 +884,7 @@ export function CrmScreen({ context }: { context: ContextResponse }) {
     }
 
     closeContactForm();
-    setContactSaved(
+    setSavedMessage(
       mode === 'create' ? 'Contact added.' : 'Contact updated.',
     );
     setContactRevision((current) => current + 1);
@@ -894,30 +912,23 @@ export function CrmScreen({ context }: { context: ContextResponse }) {
           />
         ) : null}
         {openAccount ? (
-          <>
-            {contactSaved ? (
-              <p className="write-saved" role="status" aria-live="polite">
-                {contactSaved}
-              </p>
-            ) : null}
-            <CrmContactsPanel
-              account={openAccount}
-              state={contactsState}
-              canWrite={canWrite}
-              form={contactForm}
-              values={contactValues}
-              submitting={contactSubmitting}
-              error={contactError}
-              onRetry={retryContacts}
-              onAdd={openContactCreate}
-              onEdit={openContactEdit}
-              onField={(field, value) =>
-                setContactValues((current) => ({ ...current, [field]: value }))
-              }
-              onSubmit={(event) => void submitContactForm(event)}
-              onCancel={closeContactForm}
-            />
-          </>
+          <CrmContactsPanel
+            account={openAccount}
+            state={contactsState}
+            canWrite={canWrite}
+            form={contactForm}
+            values={contactValues}
+            submitting={contactSubmitting}
+            error={contactError}
+            onRetry={retryContacts}
+            onAdd={openContactCreate}
+            onEdit={openContactEdit}
+            onField={(field, value) =>
+              setContactValues((current) => ({ ...current, [field]: value }))
+            }
+            onSubmit={(event) => void submitContactForm(event)}
+            onCancel={closeContactForm}
+          />
         ) : null}
       </>
     ) : undefined;
@@ -978,6 +989,85 @@ export function CrmScreen({ context }: { context: ContextResponse }) {
       )}
       panel={panel}
       refreshKey={revision}
+      initialSearch={initialSearch}
+      onSearchCommit={onSearchCommit}
     />
+  );
+}
+
+// The CRM module holds two views of one entitlement: the accounts the workspace
+// trades with, and the leads that become them. The route stays /app/crm and the
+// tabs switch the view inside it, so a link to the module never depends on
+// which view a member was last reading.
+export function CrmScreen({ context }: { context: ContextResponse }) {
+  const [view, setView] = useState<'accounts' | 'leads'>('accounts');
+  // The account search the tabs hand back and forth, so returning to Accounts
+  // restores the search the reader left rather than starting blank.
+  const [accountSearch, setAccountSearch] = useState('');
+  const [accountMessage, setAccountMessage] = useState<string | null>(null);
+
+  function openAccounts() {
+    setAccountMessage(null);
+    setView('accounts');
+  }
+
+  function openLeads() {
+    setView('leads');
+  }
+
+  return (
+    <div className="crm-view">
+      <div className="crm-tabs" role="tablist" aria-label="CRM views">
+        <button
+          id="crm-tab-accounts"
+          className="crm-tab"
+          type="button"
+          role="tab"
+          aria-selected={view === 'accounts'}
+          aria-controls="crm-panel"
+          onClick={openAccounts}
+        >
+          Accounts
+        </button>
+        <button
+          id="crm-tab-leads"
+          className="crm-tab"
+          type="button"
+          role="tab"
+          aria-selected={view === 'leads'}
+          aria-controls="crm-panel"
+          onClick={openLeads}
+        >
+          Leads
+        </button>
+      </div>
+
+      <div
+        id="crm-panel"
+        role="tabpanel"
+        aria-labelledby={`crm-tab-${view}`}
+      >
+        {view === 'accounts' ? (
+          <CrmAccountsScreen
+            context={context}
+            initialSearch={accountSearch}
+            initialMessage={accountMessage}
+            onSearchCommit={setAccountSearch}
+          />
+        ) : (
+          <CrmLeadsScreen
+            context={context}
+            onConverted={(accountName) => {
+              // The conversion is a write the member asked for, so the result
+              // is shown where the account now lives: the account list, with
+              // the new account already in the search.
+              setAccountSearch(accountName);
+              setAccountMessage('Lead converted to account.');
+              setView('accounts');
+            }}
+          />
+        )}
+      </div>
+    </div>
   );
 }

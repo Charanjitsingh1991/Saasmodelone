@@ -43,7 +43,7 @@ afterAll(async () => {
 });
 
 describe('schema inventory', () => {
-  test('has 67 tenant-id tables, with exactly two auth exceptions from RLS', async () => {
+  test('has 68 tenant-id tables, with exactly two auth exceptions from RLS', async () => {
     const client = await ownerClient();
     try {
       const result = await client.query<TenantTable>(`
@@ -70,9 +70,9 @@ describe('schema inventory', () => {
          order by t.table_name
       `);
 
-      expect(result.rows).toHaveLength(67);
+      expect(result.rows).toHaveLength(68);
       const isolated = result.rows.filter((row) => row.rls);
-      expect(isolated).toHaveLength(65);
+      expect(isolated).toHaveLength(66);
       expect(isolated.every((row) => row.has_permissive_isolation)).toBe(true);
       expect(isolated.every((row) => row.policy_count >= 1)).toBe(true);
 
@@ -85,7 +85,7 @@ describe('schema inventory', () => {
     }
   });
 
-  test('holds exactly one permissive isolation policy per RLS table inside the reviewed 277-policy inventory', async () => {
+  test('holds exactly one permissive isolation policy per RLS table inside the reviewed 281-policy inventory', async () => {
     const client = await ownerClient();
     try {
       const totals = await client.query<{ permissive: string; restrictive: string }>(`
@@ -96,7 +96,9 @@ describe('schema inventory', () => {
           join pg_namespace n on n.oid = c.relnamespace
          where n.nspname = 'public'
       `);
-      expect(totals.rows).toEqual([{ permissive: '66', restrictive: '211' }]);
+      // 0015 adds crm_lead: its permissive tenant_isolation policy and the
+      // three restrictive crm_* policies declared beside the table.
+      expect(totals.rows).toEqual([{ permissive: '67', restrictive: '214' }]);
 
       const perTable = await client.query<{ rls_tables: string; with_isolation: string }>(`
         select count(*) filter (where c.relrowsecurity)::text as rls_tables,
@@ -112,7 +114,7 @@ describe('schema inventory', () => {
       `);
       // Every RLS-enabled table carries exactly one permissive policy
       // (tenant_isolation, or tenant_self on tenant) and nothing else.
-      expect(perTable.rows).toEqual([{ rls_tables: '66', with_isolation: '66' }]);
+      expect(perTable.rows).toEqual([{ rls_tables: '67', with_isolation: '67' }]);
 
       const multiIsolation = await client.query<{ relname: string }>(`
         select c.relname
@@ -276,8 +278,9 @@ describe('schema inventory', () => {
       // This is the table-level inventory, so it stays at twelve: compensation's
       // grants are column-qualified and belong to column_privileges, where the
       // test below pins the exact read and write columns. The three grants added
-      // for the Work, Money and Content reads are column-qualified too, so they
-      // are absent here and are pinned in the test below.
+      // for the Work, Money and Content reads are column-qualified too, as are
+      // the lead grants 0015 added, so none of them appears here; the test below
+      // pins every one of those columns.
 
       const tables = await client.query<{ table_name: string; rls: boolean }>(`
         select t.table_name, c.relrowsecurity as rls
@@ -308,18 +311,24 @@ describe('schema inventory', () => {
     }
   });
 
-  // The three module read surfaces and the two shared client tables. Each grant
-  // is column-qualified: a column grant is not a table privilege, so the runtime
-  // cannot select a column the route does not name. On invoice and content_item
-  // the grant is read-only - there is no INSERT, UPDATE or DELETE on either, so
-  // the runtime has no path that could create, change or remove an invoice or a
-  // content item, and there is still no product write route and no write screen
-  // in either module.
+  // The three module read surfaces, the two shared client tables and the CRM
+  // lead table. Each grant is column-qualified: a column grant is not a table
+  // privilege, so the runtime cannot select a column the route does not name.
+  // On invoice and content_item the grant is read-only - there is no INSERT,
+  // UPDATE or DELETE on either, so the runtime has no path that could create,
+  // change or remove an invoice or a content item, and there is still no
+  // product write route and no write screen in either module.
   //
   // The client grant is the one CRM widens, and client_contact is the table the
   // CRM contact surface added. Both stay column-only and carry no DELETE: an
   // account is retired through its status, never erased, and a contact is
   // corrected in place because the shared table has no soft-delete column.
+  //
+  // crm_lead is the first CRM-private table. Its nine selectable, eight
+  // insertable and nine updatable columns are exactly what the lead and
+  // conversion routes name; converted_at is updatable and not selectable because
+  // the route writes it with now() and never reads it back, and it carries no
+  // DELETE anywhere.
   // public.project deliberately keeps its M0 table-level SELECT, INSERT, UPDATE
   // and DELETE grant - the M0 module denial proof depends on it - and there is
   // still no product write route and no write screen in any of the three
@@ -336,7 +345,7 @@ describe('schema inventory', () => {
           from information_schema.column_privileges
          where grantee = 'saas_runtime'
            and table_schema = 'public'
-           and table_name in ('client', 'client_contact', 'content_item', 'invoice')
+           and table_name in ('client', 'client_contact', 'crm_lead', 'content_item', 'invoice')
          order by table_name, column_name, privilege_type
       `);
       expect(columns.rows).toEqual([
@@ -394,6 +403,32 @@ describe('schema inventory', () => {
         { table_name: 'content_item', column_name: 'status', privilege_type: 'SELECT' },
         { table_name: 'content_item', column_name: 'title', privilege_type: 'SELECT' },
         { table_name: 'content_item', column_name: 'updated_at', privilege_type: 'SELECT' },
+        { table_name: 'crm_lead', column_name: 'company', privilege_type: 'INSERT' },
+        { table_name: 'crm_lead', column_name: 'company', privilege_type: 'SELECT' },
+        { table_name: 'crm_lead', column_name: 'company', privilege_type: 'UPDATE' },
+        { table_name: 'crm_lead', column_name: 'converted_at', privilege_type: 'UPDATE' },
+        { table_name: 'crm_lead', column_name: 'converted_client_id', privilege_type: 'SELECT' },
+        { table_name: 'crm_lead', column_name: 'converted_client_id', privilege_type: 'UPDATE' },
+        { table_name: 'crm_lead', column_name: 'converted_contact_id', privilege_type: 'SELECT' },
+        { table_name: 'crm_lead', column_name: 'converted_contact_id', privilege_type: 'UPDATE' },
+        { table_name: 'crm_lead', column_name: 'email', privilege_type: 'INSERT' },
+        { table_name: 'crm_lead', column_name: 'email', privilege_type: 'SELECT' },
+        { table_name: 'crm_lead', column_name: 'email', privilege_type: 'UPDATE' },
+        { table_name: 'crm_lead', column_name: 'id', privilege_type: 'INSERT' },
+        { table_name: 'crm_lead', column_name: 'id', privilege_type: 'SELECT' },
+        { table_name: 'crm_lead', column_name: 'name', privilege_type: 'INSERT' },
+        { table_name: 'crm_lead', column_name: 'name', privilege_type: 'SELECT' },
+        { table_name: 'crm_lead', column_name: 'name', privilege_type: 'UPDATE' },
+        { table_name: 'crm_lead', column_name: 'phone', privilege_type: 'INSERT' },
+        { table_name: 'crm_lead', column_name: 'phone', privilege_type: 'SELECT' },
+        { table_name: 'crm_lead', column_name: 'phone', privilege_type: 'UPDATE' },
+        { table_name: 'crm_lead', column_name: 'source', privilege_type: 'INSERT' },
+        { table_name: 'crm_lead', column_name: 'source', privilege_type: 'SELECT' },
+        { table_name: 'crm_lead', column_name: 'source', privilege_type: 'UPDATE' },
+        { table_name: 'crm_lead', column_name: 'stage', privilege_type: 'INSERT' },
+        { table_name: 'crm_lead', column_name: 'stage', privilege_type: 'SELECT' },
+        { table_name: 'crm_lead', column_name: 'stage', privilege_type: 'UPDATE' },
+        { table_name: 'crm_lead', column_name: 'tenant_id', privilege_type: 'INSERT' },
         { table_name: 'invoice', column_name: 'amount_paid_minor', privilege_type: 'SELECT' },
         { table_name: 'invoice', column_name: 'client_id', privilege_type: 'SELECT' },
         { table_name: 'invoice', column_name: 'currency', privilege_type: 'SELECT' },
@@ -407,7 +442,7 @@ describe('schema inventory', () => {
         { table_name: 'invoice', column_name: 'total_minor', privilege_type: 'SELECT' },
       ]);
 
-      // A column grant is not a table privilege. None of the four tables can be
+      // A column grant is not a table privilege. None of the five tables can be
       // selected as a whole, and none of them can be deleted.
       const privileges = await client.query<{
         table_name: string;
@@ -416,19 +451,20 @@ describe('schema inventory', () => {
       }>(`
         select t as table_name, p as privilege,
                has_table_privilege('saas_runtime', 'public.' || t, p) as allowed
-          from unnest(array['client', 'client_contact', 'content_item', 'invoice']) t
+          from unnest(array['client', 'client_contact', 'crm_lead', 'content_item', 'invoice']) t
          cross join unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) p
          order by 1, 2
       `);
       expect(privileges.rows.every((row) => !row.allowed)).toBe(true);
 
-      // No column grant carries DELETE either, on either shared client table.
+      // No column grant carries DELETE either, on either shared client table or
+      // on the CRM lead table.
       const deletes = await client.query<{ column_name: string }>(`
         select column_name
           from information_schema.column_privileges
          where grantee = 'saas_runtime'
            and table_schema = 'public'
-           and table_name in ('client', 'client_contact')
+           and table_name in ('client', 'client_contact', 'crm_lead')
            and privilege_type = 'DELETE'
          order by column_name
       `);
