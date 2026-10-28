@@ -20,6 +20,11 @@ export type ClientRowFixture = {
   id: string;
   name: string;
   code: string | null;
+  status: string;
+  billingEmail: string | null;
+  phone: string | null;
+  currency: string;
+  paymentTermsDays: number;
 };
 
 export type ProjectRowFixture = {
@@ -126,22 +131,94 @@ export async function provisionModuleTenant(
 export async function insertClientRow(
   client: Client,
   tenantId: string,
-  input: { name: string; code?: string | null; deletedAt?: string | null },
+  input: {
+    name: string;
+    code?: string | null;
+    status?: string;
+    billingEmail?: string | null;
+    phone?: string | null;
+    currency?: string;
+    paymentTermsDays?: number;
+    deletedAt?: string | null;
+  },
 ): Promise<ClientRowFixture> {
   const result = await client.query<ClientRowFixture>(
-    `insert into client (tenant_id, name, code, currency, deleted_at)
-     values ($1, $2, $3, 'ZZZ', $4::timestamptz)
-     returning id, name, code`,
+    `insert into client (tenant_id, name, code, status, billing_email, phone,
+                         currency, payment_terms_days, deleted_at)
+     values ($1, $2, $3, $4, $5::citext, $6, $7, $8, $9::timestamptz)
+     returning id,
+               name,
+               code,
+               status,
+               billing_email::text as "billingEmail",
+               phone,
+               currency::text as currency,
+               payment_terms_days as "paymentTermsDays"`,
     [
       tenantId,
       input.name,
       input.code ?? null,
+      input.status ?? 'active',
+      input.billingEmail ?? null,
+      input.phone ?? null,
+      input.currency ?? 'ZZZ',
+      input.paymentTermsDays ?? 30,
       input.deletedAt ? utcInstant(input.deletedAt) : null,
     ],
   );
   const row = result.rows[0];
   if (!row) {
     throw new Error(`Could not create the client ${input.name}`);
+  }
+  return row;
+}
+
+export type ContactRowFixture = {
+  id: string;
+  clientId: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  role: string | null;
+  isPrimary: boolean;
+};
+
+export async function insertContactRow(
+  client: Client,
+  tenantId: string,
+  input: {
+    clientId: string;
+    name: string;
+    email?: string | null;
+    phone?: string | null;
+    role?: string | null;
+    isPrimary?: boolean;
+  },
+): Promise<ContactRowFixture> {
+  const result = await client.query<ContactRowFixture>(
+    `insert into client_contact
+       (tenant_id, client_id, name, email, phone, role, is_primary)
+     values ($1, $2, $3, $4::citext, $5, $6, $7)
+     returning id,
+               client_id as "clientId",
+               name,
+               email::text as email,
+               phone,
+               role,
+               is_primary as "isPrimary"`,
+    [
+      tenantId,
+      input.clientId,
+      input.name,
+      input.email ?? null,
+      input.phone ?? null,
+      input.role ?? null,
+      input.isPrimary ?? false,
+    ],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error(`Could not create the contact ${input.name}`);
   }
   return row;
 }

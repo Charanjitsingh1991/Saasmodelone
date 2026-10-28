@@ -308,14 +308,23 @@ describe('schema inventory', () => {
     }
   });
 
-  // The three module read surfaces. Each grant is column-qualified and read-only:
-  // a column grant is not a table privilege, so the runtime cannot select a
-  // column the route does not name, and there is no INSERT, UPDATE or DELETE on
-  // client, content_item or invoice. public.project deliberately keeps its M0
-  // table-level SELECT, INSERT, UPDATE and DELETE grant - the M0 module denial
-  // proof depends on it - and there is still no product write route and no
-  // write screen in any of the three modules.
-  test('grants the runtime column-only SELECT on the three module read tables', async () => {
+  // The three module read surfaces and the two shared client tables. Each grant
+  // is column-qualified: a column grant is not a table privilege, so the runtime
+  // cannot select a column the route does not name. On invoice and content_item
+  // the grant is read-only - there is no INSERT, UPDATE or DELETE on either, so
+  // the runtime has no path that could create, change or remove an invoice or a
+  // content item, and there is still no product write route and no write screen
+  // in either module.
+  //
+  // The client grant is the one CRM widens, and client_contact is the table the
+  // CRM contact surface added. Both stay column-only and carry no DELETE: an
+  // account is retired through its status, never erased, and a contact is
+  // corrected in place because the shared table has no soft-delete column.
+  // public.project deliberately keeps its M0 table-level SELECT, INSERT, UPDATE
+  // and DELETE grant - the M0 module denial proof depends on it - and there is
+  // still no product write route and no write screen in any of the three
+  // modules.
+  test('grants the runtime column-only privileges on the client and module read tables', async () => {
     const client = await ownerClient();
     try {
       const columns = await client.query<{
@@ -327,15 +336,55 @@ describe('schema inventory', () => {
           from information_schema.column_privileges
          where grantee = 'saas_runtime'
            and table_schema = 'public'
-           and table_name in ('client', 'content_item', 'invoice')
+           and table_name in ('client', 'client_contact', 'content_item', 'invoice')
          order by table_name, column_name, privilege_type
       `);
       expect(columns.rows).toEqual([
+        { table_name: 'client', column_name: 'billing_email', privilege_type: 'INSERT' },
+        { table_name: 'client', column_name: 'billing_email', privilege_type: 'SELECT' },
+        { table_name: 'client', column_name: 'billing_email', privilege_type: 'UPDATE' },
+        { table_name: 'client', column_name: 'code', privilege_type: 'INSERT' },
         { table_name: 'client', column_name: 'code', privilege_type: 'SELECT' },
+        { table_name: 'client', column_name: 'code', privilege_type: 'UPDATE' },
+        { table_name: 'client', column_name: 'currency', privilege_type: 'INSERT' },
+        { table_name: 'client', column_name: 'currency', privilege_type: 'SELECT' },
+        { table_name: 'client', column_name: 'currency', privilege_type: 'UPDATE' },
         { table_name: 'client', column_name: 'deleted_at', privilege_type: 'SELECT' },
+        { table_name: 'client', column_name: 'id', privilege_type: 'INSERT' },
         { table_name: 'client', column_name: 'id', privilege_type: 'SELECT' },
+        { table_name: 'client', column_name: 'name', privilege_type: 'INSERT' },
         { table_name: 'client', column_name: 'name', privilege_type: 'SELECT' },
+        { table_name: 'client', column_name: 'name', privilege_type: 'UPDATE' },
+        { table_name: 'client', column_name: 'payment_terms_days', privilege_type: 'INSERT' },
+        { table_name: 'client', column_name: 'payment_terms_days', privilege_type: 'SELECT' },
+        { table_name: 'client', column_name: 'payment_terms_days', privilege_type: 'UPDATE' },
+        { table_name: 'client', column_name: 'phone', privilege_type: 'INSERT' },
+        { table_name: 'client', column_name: 'phone', privilege_type: 'SELECT' },
+        { table_name: 'client', column_name: 'phone', privilege_type: 'UPDATE' },
+        { table_name: 'client', column_name: 'status', privilege_type: 'INSERT' },
         { table_name: 'client', column_name: 'status', privilege_type: 'SELECT' },
+        { table_name: 'client', column_name: 'status', privilege_type: 'UPDATE' },
+        { table_name: 'client', column_name: 'tenant_id', privilege_type: 'INSERT' },
+        { table_name: 'client_contact', column_name: 'client_id', privilege_type: 'INSERT' },
+        { table_name: 'client_contact', column_name: 'client_id', privilege_type: 'SELECT' },
+        { table_name: 'client_contact', column_name: 'email', privilege_type: 'INSERT' },
+        { table_name: 'client_contact', column_name: 'email', privilege_type: 'SELECT' },
+        { table_name: 'client_contact', column_name: 'email', privilege_type: 'UPDATE' },
+        { table_name: 'client_contact', column_name: 'id', privilege_type: 'INSERT' },
+        { table_name: 'client_contact', column_name: 'id', privilege_type: 'SELECT' },
+        { table_name: 'client_contact', column_name: 'is_primary', privilege_type: 'INSERT' },
+        { table_name: 'client_contact', column_name: 'is_primary', privilege_type: 'SELECT' },
+        { table_name: 'client_contact', column_name: 'is_primary', privilege_type: 'UPDATE' },
+        { table_name: 'client_contact', column_name: 'name', privilege_type: 'INSERT' },
+        { table_name: 'client_contact', column_name: 'name', privilege_type: 'SELECT' },
+        { table_name: 'client_contact', column_name: 'name', privilege_type: 'UPDATE' },
+        { table_name: 'client_contact', column_name: 'phone', privilege_type: 'INSERT' },
+        { table_name: 'client_contact', column_name: 'phone', privilege_type: 'SELECT' },
+        { table_name: 'client_contact', column_name: 'phone', privilege_type: 'UPDATE' },
+        { table_name: 'client_contact', column_name: 'role', privilege_type: 'INSERT' },
+        { table_name: 'client_contact', column_name: 'role', privilege_type: 'SELECT' },
+        { table_name: 'client_contact', column_name: 'role', privilege_type: 'UPDATE' },
+        { table_name: 'client_contact', column_name: 'tenant_id', privilege_type: 'INSERT' },
         { table_name: 'content_item', column_name: 'deleted_at', privilege_type: 'SELECT' },
         { table_name: 'content_item', column_name: 'id', privilege_type: 'SELECT' },
         { table_name: 'content_item', column_name: 'kind', privilege_type: 'SELECT' },
@@ -358,8 +407,8 @@ describe('schema inventory', () => {
         { table_name: 'invoice', column_name: 'total_minor', privilege_type: 'SELECT' },
       ]);
 
-      // A column grant is not a table privilege. None of the three tables can be
-      // selected as a whole, and none of them can be written at all.
+      // A column grant is not a table privilege. None of the four tables can be
+      // selected as a whole, and none of them can be deleted.
       const privileges = await client.query<{
         table_name: string;
         privilege: string;
@@ -367,11 +416,23 @@ describe('schema inventory', () => {
       }>(`
         select t as table_name, p as privilege,
                has_table_privilege('saas_runtime', 'public.' || t, p) as allowed
-          from unnest(array['client', 'content_item', 'invoice']) t
+          from unnest(array['client', 'client_contact', 'content_item', 'invoice']) t
          cross join unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) p
          order by 1, 2
       `);
       expect(privileges.rows.every((row) => !row.allowed)).toBe(true);
+
+      // No column grant carries DELETE either, on either shared client table.
+      const deletes = await client.query<{ column_name: string }>(`
+        select column_name
+          from information_schema.column_privileges
+         where grantee = 'saas_runtime'
+           and table_schema = 'public'
+           and table_name in ('client', 'client_contact')
+           and privilege_type = 'DELETE'
+         order by column_name
+      `);
+      expect(deletes.rows).toEqual([]);
 
       // project keeps its table-level grant deliberately. The M0 module denial
       // proof in tests/module-rls.test.ts must fail on the restrictive RLS

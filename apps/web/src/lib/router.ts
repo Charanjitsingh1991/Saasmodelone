@@ -4,6 +4,7 @@
 // the navigation does not offer.
 export const MODULE_SCREENS = {
   people: '/app/people',
+  crm: '/app/crm',
   work: '/app/work',
   money: '/app/money',
   content: '/app/content',
@@ -49,6 +50,8 @@ export function routeTitle(route: Route): string {
       return 'Workspace — SaaSModels One';
     case 'people':
       return 'People — SaaSModels One';
+    case 'crm':
+      return 'CRM — SaaSModels One';
     case 'work':
       return 'Work — SaaSModels One';
     case 'money':

@@ -964,16 +964,20 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
 }
 
 /* People write form. It reuses .field and .form-alert from the sign-in card so
-   the controls stay on the same tokens. */
+   the controls stay on the same tokens. The .write-* names are the same rules
+   under names that do not belong to People alone: the CRM account form and the
+   contacts panel are the same controls in another module. */
 
-.people-saved {
+.people-saved,
+.write-saved {
   margin: 18px 0 0;
   color: var(--violet);
   font-size: 0.88rem;
   font-weight: 620;
 }
 
-.people-form {
+.people-form,
+.write-form {
   margin: 22px 0 0;
   padding: clamp(18px, 3vw, 26px);
   border: 1px solid var(--line-strong);
@@ -981,14 +985,16 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
   background: var(--paper-raised);
 }
 
-.people-form-title {
+.people-form-title,
+.write-form-title {
   margin: 0;
   font-size: 1.12rem;
   font-weight: 640;
   letter-spacing: -0.02em;
 }
 
-.people-form-grid {
+.people-form-grid,
+.write-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px 20px;
@@ -1000,12 +1006,14 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
   font-weight: 500;
 }
 
-.people-form .field input::placeholder {
+.people-form .field input::placeholder,
+.write-form .field input::placeholder {
   color: var(--ink-faint);
   opacity: 1;
 }
 
-.people-form-actions {
+.people-form-actions,
+.write-form-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1015,11 +1023,13 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
 
 /* The primary button is full width in the sign-in card; here it sits beside
    Cancel, and the media query below returns both to full width on phones. */
-.people-form-actions .button--primary {
+.people-form-actions .button--primary,
+.write-form-actions .button--primary {
   width: auto;
 }
 
-.people-form-note {
+.people-form-note,
+.write-form-note {
   max-width: 64ch;
   margin: 16px 0 0;
   line-height: 1.6;
@@ -1029,12 +1039,23 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
    .people-form-actions so an identity edit and a placement read as one set of
    controls. */
 
-.placement-panel {
+.placement-panel,
+.write-panel {
   margin: 22px 0 0;
   padding: clamp(18px, 3vw, 26px);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-md);
   background: var(--paper-raised);
+}
+
+/* A panel that carries one control of its own: the title on the left, the
+   control on the right, and both on one line until the panel gets narrow. */
+.write-panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .placement-form {
@@ -1045,7 +1066,8 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
   max-width: 460px;
 }
 
-.placement-state {
+.placement-state,
+.write-state {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1053,7 +1075,8 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
   margin-top: 14px;
 }
 
-.placement-empty {
+.placement-empty,
+.write-empty {
   max-width: 46ch;
   margin: 0;
   line-height: 1.6;
@@ -1332,17 +1355,21 @@ html[data-theme='dark'] .nav-item[aria-current='page'] .nav-state {
     flex: 1 1 auto;
   }
 
-  .people-form-grid {
+  .people-form-grid,
+  .write-form-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .people-form-actions {
+  .people-form-actions,
+  .write-form-actions {
     flex-direction: column;
     align-items: stretch;
   }
 
   .people-form-actions .button,
-  .people-form-actions .button--primary {
+  .people-form-actions .button--primary,
+  .write-form-actions .button,
+  .write-form-actions .button--primary {
     width: 100%;
   }
 

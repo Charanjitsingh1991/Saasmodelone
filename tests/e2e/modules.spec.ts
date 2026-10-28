@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { Client, Pool } from 'pg';
 import { expect, test } from '@playwright/test';
+import { appOrigin } from './ports.js';
 import { createServer } from '@saasmodels/api';
 import {
   createAuthPool,
@@ -12,7 +13,6 @@ import {
 } from '@saasmodels/db';
 import { createTestDatabase, type TestDatabase } from '@saasmodels/testkit';
 
-const appOrigin = 'http://localhost:3000';
 const apiPort = 3001;
 const syntheticPassword = 'Synthetic-modules-passphrase-2026';
 

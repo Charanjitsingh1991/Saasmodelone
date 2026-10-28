@@ -36,6 +36,8 @@ const OWNER_PERMISSIONS: Permission[] = [
   'people.write',
   'people.compensation.read',
   'people.compensation.write',
+  'crm.read',
+  'crm.write',
   'work.read',
   'money.read',
   'content.read',
@@ -221,6 +223,10 @@ describe('module presentation', () => {
     expect(landingPath(context([module('work', 30)]))).toBe('/app/work');
     expect(landingPath(context([module('money', 40)]))).toBe('/app/money');
     expect(landingPath(context([module('content', 50)]))).toBe('/app/content');
+
+    // CRM has a screen too, and catalog order puts it ahead of Work, so a
+    // CRM-only member lands on the CRM screen rather than on the home page.
+    expect(landingPath(context([module('crm', 20)]))).toBe('/app/crm');
 
     // A module that cannot be read is not a navigation module, so it cannot
     // be a landing page either.

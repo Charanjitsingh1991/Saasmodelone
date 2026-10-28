@@ -1165,6 +1165,8 @@ describe('Compensation read inventory', () => {
       'people.write',
       'people.compensation.read',
       'people.compensation.write',
+      'crm.read',
+      'crm.write',
       'work.read',
       'money.read',
       'content.read',

@@ -20,10 +20,12 @@ export type ModuleOperation = (typeof MODULE_OPERATIONS)[number];
 // half is a second permission for the same reason - being able to read a pay row
 // says nothing about being allowed to change one, and vice versa.
 //
-// The last three names are one read per module that has a shipped read surface.
-// There is no people.search, no money.export and no content.publish: a module
-// that can only be read is published as a read, and a write that is not built
-// is not published at all.
+// crm.read and crm.write are the pair the CRM surface asks for, one read and
+// one write for a module that has both. After them, work.read, money.read and
+// content.read are one read each, for the modules that have a shipped read
+// surface. There is no people.search, no money.export and no content.publish:
+// a module that can only be read is published as a read, and a write that is
+// not built is not published at all.
 //
 // work.write was withdrawn on 27 October 2026. It was the only published
 // permission no route asked for, and while it stayed published the context
@@ -31,11 +33,20 @@ export type ModuleOperation = (typeof MODULE_OPERATIONS)[number];
 // and no screen offers. permissionFor derives from this list, so
 // permissionFor('work', 'write') is now null and /v1/context answers
 // canWrite = false for Work with no change to the route that asks.
+//
+// crm.read was added on 28 October 2026 with the CRM account read surface and
+// crm.write with the account and contact writes. They sit ahead of the module
+// reads because CRM is the second module in the catalog order, and their names
+// follow the same module.operation shape as every other one, so
+// permissionFor('crm', 'read') and permissionFor('crm', 'write') resolve them
+// with no extra wiring.
 export const PERMISSIONS = [
   'people.read',
   'people.write',
   'people.compensation.read',
   'people.compensation.write',
+  'crm.read',
+  'crm.write',
   'work.read',
   'money.read',
   'content.read',
@@ -72,12 +83,31 @@ export type Permission = (typeof PERMISSIONS)[number];
 // reads money because invoices are what it reconciles. Manager and auditor read
 // work because projects are what they are staffed and reviewed against. Neither
 // holds content.read: nothing in the roles built so far needs to read the CMS.
+//
+// CRM is read by owner, admin, finance and manager, and by nobody else. A
+// CRM-only buyer is the standalone thesis this batch exists to prove, so the
+// read must be available to a member whose only module is CRM: entitlement
+// and role are two separate gates, and a role that holds no CRM permission
+// refuses a member who does hold the entitlement. Finance and manager read
+// accounts and contacts because a client relationship is what both work
+// against. Hr holds neither, because a People lead has no reason to see a
+// customer list, and neither does an auditor: an audit role is built for
+// aggregates and reconciliation, and a named contact list is neither.
+//
+// crm.write is narrower still: only owner and admin hold it. A relationship
+// record is the commercial core of the tenant, and changing one is an
+// administrative act rather than a reading of it, so the two roles that
+// administer the workspace are the two that may change a client record. A
+// manager and a finance member read accounts to work against them; neither
+// renames one.
 const ROLE_PERMISSIONS = {
   owner: [
     'people.read',
     'people.write',
     'people.compensation.read',
     'people.compensation.write',
+    'crm.read',
+    'crm.write',
     'work.read',
     'money.read',
     'content.read',
@@ -87,6 +117,8 @@ const ROLE_PERMISSIONS = {
     'people.write',
     'people.compensation.read',
     'people.compensation.write',
+    'crm.read',
+    'crm.write',
     'work.read',
     'money.read',
     'content.read',
@@ -101,10 +133,11 @@ const ROLE_PERMISSIONS = {
     'people.read',
     'people.compensation.read',
     'people.compensation.write',
+    'crm.read',
     'work.read',
     'money.read',
   ],
-  manager: ['people.read', 'work.read'],
+  manager: ['people.read', 'crm.read', 'work.read'],
   employee: [],
   auditor: ['people.read', 'work.read'],
 } satisfies Record<MembershipRole, readonly Permission[]>;

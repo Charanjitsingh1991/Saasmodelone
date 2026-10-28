@@ -588,8 +588,10 @@ describe('tenant provisioning', () => {
       provisionTenant(ownerPool(), { ...base, modules: ['core'] }),
     ).rejects.toMatchObject({ code: 'MODULE_NOT_LICENSABLE' });
 
+    // Procurement is still 'planned', so a public tenant cannot hold it. CRM
+    // left 'planned' on 28 October 2026 and its own rule is proved below.
     await expect(
-      provisionTenant(ownerPool(), { ...base, modules: ['crm'] }),
+      provisionTenant(ownerPool(), { ...base, modules: ['procurement'] }),
     ).rejects.toMatchObject({ code: 'MODULE_NOT_AVAILABLE' });
 
     const retiredCode = `retired_${suffix()}`;
@@ -619,8 +621,45 @@ describe('tenant provisioning', () => {
       dataRegion: 'test-region',
       ownerEmail: `internal_${suffix()}@example.test`,
       ownerDisplayName: 'Internal Owner',
-      modules: ['crm'],
+      modules: ['procurement'],
       isInternal: true,
+    });
+
+    const entitlement = one(
+      (
+        await ownerPool().query<{ source: string; status: string }>(
+          `select e.source, e.status
+             from module_entitlement e
+             join platform_module m on m.id = e.module_id
+            where e.tenant_id = $1 and m.code = 'procurement'`,
+          [result.tenantId],
+        )
+      ).rows,
+    );
+    expect(entitlement).toEqual({ source: 'internal', status: 'active' });
+
+    const helper = await withRuntime(result.tenantId, async (client) => {
+      const resultRows = await client.query<{ write: boolean; read: boolean }>(
+        "select app.has_module_write('procurement') as write, app.has_module_read('procurement') as read",
+      );
+      return resultRows.rows[0];
+    });
+    expect(helper).toEqual({ read: true, write: true });
+  });
+
+  // CRM left 'planned' on 28 October 2026, when the CRM account and contact
+  // surfaces shipped on the shared client records. A public tenant can now
+  // hold CRM on the ordinary contract path, with no internal source and no
+  // schema change, which is the standalone-CRM thesis this batch exists to
+  // prove.
+  test('a public tenant can now be provisioned with CRM alone', async () => {
+    const result = await provisionTenant(ownerPool(), {
+      name: 'Standalone CRM Co',
+      slug: `crm-only-${suffix()}`,
+      dataRegion: 'test-region',
+      ownerEmail: `crm_only_${suffix()}@example.test`,
+      ownerDisplayName: 'CRM Owner',
+      modules: ['crm'],
     });
 
     const entitlement = one(
@@ -634,7 +673,7 @@ describe('tenant provisioning', () => {
         )
       ).rows,
     );
-    expect(entitlement).toEqual({ source: 'internal', status: 'active' });
+    expect(entitlement).toEqual({ source: 'contract', status: 'active' });
 
     const helper = await withRuntime(result.tenantId, async (client) => {
       const resultRows = await client.query<{ write: boolean; read: boolean }>(
@@ -643,6 +682,17 @@ describe('tenant provisioning', () => {
       return resultRows.rows[0];
     });
     expect(helper).toEqual({ read: true, write: true });
+
+    // The tenant holds CRM and nothing else: no People entitlement, so the
+    // CRM-only journey is proved without a directory licence behind it.
+    const modules = await ownerPool().query<{ code: string }>(
+      `select m.code
+         from module_entitlement e
+         join platform_module m on m.id = e.module_id
+        where e.tenant_id = $1 and e.status = 'active'`,
+      [result.tenantId],
+    );
+    expect(modules.rows.map((row) => row.code)).toEqual(['crm']);
   });
 
   test('reuses an existing eligible owner and never changes the display name', async () => {
@@ -1016,7 +1066,7 @@ describe('entitlement lifecycle', () => {
     await expect(
       grantEntitlement(ownerPool(), {
         tenantId: bareTenant(),
-        moduleCode: 'crm',
+        moduleCode: 'procurement',
         actorUserId: a.userId,
       }),
     ).rejects.toMatchObject({ code: 'MODULE_NOT_AVAILABLE' });
@@ -1036,7 +1086,7 @@ describe('entitlement lifecycle', () => {
     await expect(
       grantEntitlement(ownerPool(), {
         tenantId: b.tenantId,
-        moduleCode: 'crm',
+        moduleCode: 'procurement',
         actorUserId: b.userId,
         source: 'contract',
       }),
@@ -1044,7 +1094,7 @@ describe('entitlement lifecycle', () => {
 
     await grantEntitlement(ownerPool(), {
       tenantId: b.tenantId,
-      moduleCode: 'crm',
+      moduleCode: 'procurement',
       actorUserId: b.userId,
       source: 'internal',
     });
@@ -1055,7 +1105,7 @@ describe('entitlement lifecycle', () => {
           `select e.source, e.status
              from module_entitlement e
              join platform_module m on m.id = e.module_id
-            where e.tenant_id = $1 and m.code = 'crm'`,
+            where e.tenant_id = $1 and m.code = 'procurement'`,
           [b.tenantId],
         )
       ).rows,

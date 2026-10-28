@@ -4,7 +4,10 @@
 --
 -- Work, Money and Content moved from 'planned' to 'preview' on 27 October
 -- 2026, by the owner's decision to build all five modules rather than one at a
--- time (suite/docs/adr/0013-work-money-content-read.md). 'preview' means the
+-- time (suite/docs/adr/0013-work-money-content-read.md). CRM moved on
+-- 28 October 2026, when the CRM account and contact surfaces shipped on the
+-- shared client records (suite/docs/adr/0014-crm-accounts-contacts.md).
+-- 'preview' means the
 -- module is publicly licensable and pre-GA: a normal tenant can hold it on a
 -- contract entitlement and its read surface is served, but nothing here says
 -- the module is generally available or that anything beyond the shipped read
@@ -19,7 +22,7 @@
 -- The insert below is 'on conflict (code) do nothing', so a database seeded
 -- before this change keeps its existing 'planned' rows. The update below is
 -- what moves an existing catalog to the status this file declares; it is
--- idempotent and it only touches the three modules named here.
+-- idempotent and it only touches the four modules named here.
 
 begin;
 
@@ -37,7 +40,7 @@ values
    true, false, 'employee', 'preview', 10),
   ('crm', 'CRM', 'crm',
    'Accounts, contacts, leads, pipeline and activities.',
-   true, false, 'seat', 'planned', 20),
+   true, false, 'seat', 'preview', 20),
   ('work', 'Work', 'projects',
    'Engagements, projects, allocations, timesheets and project margin.',
    true, false, 'employee', 'preview', 30),
@@ -59,12 +62,12 @@ values
 on conflict (code) do nothing;
 
 -- The insert above cannot change an existing row, so a catalog seeded before
--- 27 October 2026 still says 'planned' for these three modules. This moves
+-- 27 October 2026 still says 'planned' for these four modules. This moves
 -- exactly those rows and nothing else: a module already at 'preview',
 -- 'available' or 'retired' is left alone.
 update platform_module
    set status = 'preview'
- where code in ('work', 'money', 'content')
+ where code in ('crm', 'work', 'money', 'content')
    and status = 'planned';
 
 insert into platform_module_dependency (module_id, depends_on_module_id, optional, reason)

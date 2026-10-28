@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { Client } from 'pg';
 import { expect, test, type Page } from '@playwright/test';
+import { appOrigin } from './ports.js';
 import { createServer } from '@saasmodels/api';
 import {
   createAuthPool,
@@ -15,7 +16,6 @@ import {
   type AccessFixtures,
 } from '../support/access-fixtures';
 
-const appOrigin = 'http://localhost:3000';
 const apiPort = 3001;
 const syntheticPassword = 'Synthetic-e2e-passphrase-2026';
 

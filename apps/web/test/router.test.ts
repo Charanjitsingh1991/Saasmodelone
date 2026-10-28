@@ -2,13 +2,15 @@ import { describe, expect, test } from 'vitest';
 import { parseRoute, routeTitle } from '../src/lib/router';
 
 describe('history routes', () => {
-  test('maps the six supported routes and accepts a trailing slash', () => {
+  test('maps the seven supported routes and accepts a trailing slash', () => {
     expect(parseRoute('/login')).toEqual({ name: 'login' });
     expect(parseRoute('/login/')).toEqual({ name: 'login' });
     expect(parseRoute('/app')).toEqual({ name: 'home' });
     expect(parseRoute('/app/')).toEqual({ name: 'home' });
     expect(parseRoute('/app/people')).toEqual({ name: 'people' });
     expect(parseRoute('/app/people/')).toEqual({ name: 'people' });
+    expect(parseRoute('/app/crm')).toEqual({ name: 'crm' });
+    expect(parseRoute('/app/crm/')).toEqual({ name: 'crm' });
     expect(parseRoute('/app/work')).toEqual({ name: 'work' });
     expect(parseRoute('/app/work/')).toEqual({ name: 'work' });
     expect(parseRoute('/app/money')).toEqual({ name: 'money' });

@@ -2392,12 +2392,14 @@ describe('Compensation write inventory', () => {
     });
   });
 
-  test('publishes seven permissions and never answers a module operation with either compensation name', () => {
+  test('publishes nine permissions and never answers a module operation with either compensation name', () => {
     expect(PERMISSIONS).toEqual([
       'people.read',
       'people.write',
       'people.compensation.read',
       'people.compensation.write',
+      'crm.read',
+      'crm.write',
       'work.read',
       'money.read',
       'content.read',

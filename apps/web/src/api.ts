@@ -6,6 +6,15 @@ import type {
   CompensationUpdateInput,
   ContentListInput,
   ContentListResponse,
+  CrmAccountCreateInput,
+  CrmAccountListInput,
+  CrmAccountListItem,
+  CrmAccountListResponse,
+  CrmAccountUpdateInput,
+  CrmContactCreateInput,
+  CrmContactItem,
+  CrmContactListResponse,
+  CrmContactUpdateInput,
   EmploymentCreateInput,
   EmploymentItem,
   EmploymentListResponse,
@@ -111,8 +120,8 @@ function writeHeaders(): Record<string, string> {
 }
 
 // The query string every list route takes: a search term, a page and a page
-// size. One builder for all four lists, so the three module screens ask for
-// exactly what the directory asks for.
+// size. One builder for all five list surfaces, so the directory and the four
+// module screens ask for exactly the same page.
 function listQuery(input: {
   q?: string;
   page?: number;
@@ -144,6 +153,65 @@ export const api = {
     );
   },
 
+  // The CRM account read surface. A GET, so no CSRF header; the server gates it
+  // on crm.read and the rows are the shared client records this tenant holds.
+  crmAccounts: (input: CrmAccountListInput = {}) => {
+    const query = listQuery(input);
+    return request<CrmAccountListResponse>(
+      query === '' ? '/v1/crm/accounts' : `/v1/crm/accounts?${query}`,
+    );
+  },
+
+  // A CRM account write. The server gates it on crm.write, names the columns
+  // itself and audits the field names only.
+  createCrmAccount: (input: CrmAccountCreateInput) =>
+    request<CrmAccountListItem>('/v1/crm/accounts', {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify(input),
+    }),
+
+  updateCrmAccount: (id: string, input: CrmAccountUpdateInput) =>
+    request<CrmAccountListItem>(`/v1/crm/accounts/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: writeHeaders(),
+      body: JSON.stringify(input),
+    }),
+
+  // The contacts of one account. A GET, so no CSRF header; the server gates it
+  // on crm.read and settles the account in the path before it looks for a
+  // contact.
+  crmContacts: (accountId: string) =>
+    request<CrmContactListResponse>(
+      `/v1/crm/accounts/${encodeURIComponent(accountId)}/contacts`,
+    ),
+
+  // A contact write. The server gates it on crm.write, names the columns
+  // itself and audits the field names only.
+  createCrmContact: (accountId: string, input: CrmContactCreateInput) =>
+    request<CrmContactItem>(
+      `/v1/crm/accounts/${encodeURIComponent(accountId)}/contacts`,
+      {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify(input),
+      },
+    ),
+
+  updateCrmContact: (
+    accountId: string,
+    contactId: string,
+    input: CrmContactUpdateInput,
+  ) =>
+    request<CrmContactItem>(
+      `/v1/crm/accounts/${encodeURIComponent(accountId)}/contacts/${encodeURIComponent(contactId)}`,
+      {
+        method: 'PATCH',
+        headers: writeHeaders(),
+        body: JSON.stringify(input),
+      },
+    ),
+
   // The Work read surface. A GET, so no CSRF header; the server gates it on
   // work.read and the module policy narrows the rows.
   workProjects: (input: ProjectListInput = {}) => {
@@ -152,7 +220,6 @@ export const api = {
       query === '' ? '/v1/work/projects' : `/v1/work/projects?${query}`,
     );
   },
-
   // The Money read surface. The server gates it on money.read.
   moneyInvoices: (input: InvoiceListInput = {}) => {
     const query = listQuery(input);

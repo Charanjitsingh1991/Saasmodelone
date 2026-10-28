@@ -357,22 +357,31 @@ describe('platform access helpers', () => {
   test('an internal tenant reaches a planned module with an internal-source entitlement', async () => {
     const tenantId = await withOwner(async (client) => {
       const id = await createTenant(client, { internal: true });
-      await createEntitlement(client, id, 'crm', { status: 'active', source: 'internal' });
+      await createEntitlement(client, id, 'procurement', {
+        status: 'active',
+        source: 'internal',
+      });
       return id;
     });
 
-    const flags = await accessFlags(tenantId, 'crm');
+    const flags = await accessFlags(tenantId, 'procurement');
     expect(flags.module_read).toBe(true);
     expect(flags.module_write).toBe(true);
     expect(flags.switch_access).toBe(true);
   });
 
+  // Procurement is still 'planned'. CRM left that status on 28 October 2026,
+  // when the CRM account and contact surfaces shipped, so a planned module is
+  // proved with a module that is still planned.
   test('a public tenant cannot reach a planned module through an entitlement', async () => {
     const [contractTenant, internalSourceTenant] = await withOwner(async (client) => {
       const contract = await createTenant(client);
-      await createEntitlement(client, contract, 'crm', { status: 'active', source: 'contract' });
+      await createEntitlement(client, contract, 'procurement', {
+        status: 'active',
+        source: 'contract',
+      });
       const internalSource = await createTenant(client);
-      await createEntitlement(client, internalSource, 'crm', {
+      await createEntitlement(client, internalSource, 'procurement', {
         status: 'active',
         source: 'internal',
       });
@@ -380,7 +389,7 @@ describe('platform access helpers', () => {
     });
 
     for (const tenantId of [contractTenant, internalSourceTenant]) {
-      const flags = await accessFlags(tenantId, 'crm');
+      const flags = await accessFlags(tenantId, 'procurement');
       expect(flags.module_read).toBe(false);
       expect(flags.module_write).toBe(false);
       expect(flags.switch_access).toBe(false);
@@ -527,11 +536,14 @@ describe('platform access helpers', () => {
   test('an internal tenant still needs an internal-source entitlement for a planned module', async () => {
     const tenantId = await withOwner(async (client) => {
       const id = await createTenant(client, { internal: true });
-      await createEntitlement(client, id, 'crm', { status: 'active', source: 'contract' });
+      await createEntitlement(client, id, 'procurement', {
+        status: 'active',
+        source: 'contract',
+      });
       return id;
     });
 
-    const flags = await accessFlags(tenantId, 'crm');
+    const flags = await accessFlags(tenantId, 'procurement');
     expect(flags.module_read).toBe(false);
     expect(flags.module_write).toBe(false);
     expect(flags.switch_access).toBe(false);

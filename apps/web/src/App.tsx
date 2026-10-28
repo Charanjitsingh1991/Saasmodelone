@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { ContextResponse, SessionResponse } from '@saasmodels/contracts';
 import { api, setCsrfToken, setUnauthorizedListener } from './api';
 import { AppShell } from './components/AppShell';
+import { CrmScreen } from './components/CrmScreens';
 import { LoginScreen } from './components/LoginScreen';
 import {
   ContentScreen,
@@ -183,6 +184,16 @@ export function App() {
         <PeopleScreen context={context} />
       ) : (
         <PeopleAccessState context={context} onNavigate={navigate} />
+      )
+    ) : route.name === 'crm' ? (
+      canReadModule(context, 'crm') ? (
+        <CrmScreen context={context} />
+      ) : (
+        <ModuleAccessState
+          context={context}
+          moduleName="CRM"
+          onNavigate={navigate}
+        />
       )
     ) : route.name === 'work' ? (
       canReadModule(context, 'work') ? (

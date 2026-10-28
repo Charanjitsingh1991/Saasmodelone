@@ -114,9 +114,11 @@ grant update (
 -- The Work, Money and Content read surfaces. Three column-only SELECT grants,
 -- one per table, for exactly the columns the three routes name. There is no
 -- table-level privilege on any of the three and no INSERT, UPDATE or DELETE on
--- invoice, content_item or client: the runtime role has no path that could
--- create, change or remove an invoice or a content item, and there is still no
--- product write route and no write screen in any of the three modules.
+-- invoice or content_item: the runtime role has no path that could create,
+-- change or remove an invoice or a content item, and there is still no product
+-- write route and no write screen in either of those two modules. The client
+-- grant is the third of the three, and it is the one CRM widens - the CRM
+-- write grants are further down this file.
 --
 -- public.project is not in this list because it already carries the M0
 -- table-level grant above, which the M0 module denial proof depends on: those
@@ -139,9 +141,63 @@ grant select (
   id, kind, slug, title, locale, status, published_at, updated_at, deleted_at
 ) on table public.content_item to saas_runtime;
 
+-- The CRM account surface widens the client grant and no other: billing_email,
+-- phone, currency and payment_terms_days are added for the CRM read, and
+-- deleted_at stays because the account route excludes a soft-deleted row
+-- without ever answering with it. A module policy on this table would break a
+-- standalone Work or Money read, so the module gate on the route is the only
+-- thing that keeps an unlicensed module from naming a client.
 grant select (
-  id, name, code, status, deleted_at
+  id, name, code, status, billing_email, phone, currency, payment_terms_days,
+  deleted_at
 ) on table public.client to saas_runtime;
+
+-- The CRM account write, and exactly the columns the two write routes name.
+-- There is still no table-level privilege on this table and no DELETE: an
+-- account is retired through its status, never erased, and there is no delete
+-- route and no delete policy for a command no role can execute. id and
+-- tenant_id are insertable because a new row must state which account it is
+-- and which workspace owns it; both are deliberately absent from UPDATE, so no
+-- one can move an account onto another identity or another tenant. The UPDATE
+-- grant is the seven stored fields the account write names: name, code, status,
+-- billing_email, phone, currency and payment_terms_days. With id that is the
+-- eight-key response, and nothing else is writable: owner_user_id, the
+-- provenance columns, the timestamps and deleted_at stay owner-only, and the
+-- runtime never writes deleted_at, so a soft delete is not something the
+-- product can do to a shared record. RLS remains the tenant boundary for every
+-- write.
+grant insert (
+  id, tenant_id, name, code, status, billing_email, phone, currency,
+  payment_terms_days
+) on table public.client to saas_runtime;
+
+grant update (
+  name, code, status, billing_email, phone, currency, payment_terms_days
+) on table public.client to saas_runtime;
+
+-- The CRM contact surface. client_contact is shared platform-owned directory
+-- data like client itself, and it carries the same tenant_isolation policy
+-- with no module policy, so a standalone Work or Money read is untouched by
+-- it. The column grants name exactly the six fields the contact surface
+-- returns plus the two a new row must state: there is no table-level
+-- privilege, no DELETE, and no grant on the timestamps. client_id is
+-- insertable because a new contact must state which account it belongs to,
+-- and it is deliberately absent from UPDATE, so no one can move a contact onto
+-- another account. There is no delete route and no soft-delete column on this
+-- table, which is a limitation of the shared record and not a choice this
+-- product makes: a contact is corrected in place. RLS remains the tenant
+-- boundary for every write.
+grant select (
+  id, client_id, name, email, phone, role, is_primary
+) on table public.client_contact to saas_runtime;
+
+grant insert (
+  id, tenant_id, client_id, name, email, phone, role, is_primary
+) on table public.client_contact to saas_runtime;
+
+grant update (
+  name, email, phone, role, is_primary
+) on table public.client_contact to saas_runtime;
 
 -- Append-only audit writer. No SELECT, UPDATE or DELETE is granted.
 grant insert on table public.audit_event to saas_runtime;

@@ -31,7 +31,7 @@ type ListState<T> =
 
 type ModuleRow = { id: string };
 
-type Column<T> = {
+export type Column<T> = {
   header: string;
   render: (item: T) => ReactNode;
 };
@@ -58,6 +58,18 @@ type ModuleListScreenProps<T extends ModuleRow> = {
   load: (
     input: { q: string; page: number; pageSize: number },
   ) => Promise<ApiResult<ListResponse<T>>>;
+  // What sits above the table, beside the search. A module with no writes
+  // passes nothing and gets no controls.
+  headerActions?: ReactNode;
+  // What a row can carry. The screen adds an Actions column only when a
+  // module asks for one, so a read-only module keeps a table of data alone.
+  rowActions?: (item: T) => ReactNode;
+  // A panel the module owns, shown under the toolbar: a write form, or the
+  // details of the row a member opened.
+  panel?: ReactNode;
+  // The screen reloads when this changes, so a module that writes outside the
+  // list can refresh the rows it just changed.
+  refreshKey?: number;
 };
 
 function listCount(total: number, singular: string, plural: string): string {
@@ -89,7 +101,7 @@ function statusCopy<T>(
 // Every state says what this view holds, never what the workspace holds. A
 // member sees only the rows their licence and role cover, so "no rows" is a
 // statement about the view and never a statement about the workspace.
-function ModuleListScreen<T extends ModuleRow>({
+export function ModuleListScreen<T extends ModuleRow>({
   context,
   moduleCode,
   eyebrow,
@@ -109,6 +121,10 @@ function ModuleListScreen<T extends ModuleRow>({
   note,
   columns,
   load,
+  headerActions,
+  rowActions,
+  panel,
+  refreshKey = 0,
 }: ModuleListScreenProps<T>) {
   const module = findModule(context, moduleCode);
   const [draft, setDraft] = useState('');
@@ -143,7 +159,7 @@ function ModuleListScreen<T extends ModuleRow>({
     return () => {
       stale = true;
     };
-  }, [term, page, attempt, load, pageSize, errorMessage]);
+  }, [term, page, attempt, load, pageSize, errorMessage, refreshKey]);
 
   const data = state.phase === 'ready' ? state.data : null;
   const totalPages =
@@ -185,10 +201,13 @@ function ModuleListScreen<T extends ModuleRow>({
               Search
             </button>
           </form>
+          {headerActions ? <div className="directory-actions">{headerActions}</div> : null}
           <p className="directory-count" role="status" aria-live="polite">
             {statusCopy(state, singular, plural, unavailableLabel, loadingMessage)}
           </p>
         </div>
+
+        {panel}
 
         {state.phase === 'error' ? (
           <div className="directory-state">
@@ -213,6 +232,7 @@ function ModuleListScreen<T extends ModuleRow>({
                       {column.header}
                     </th>
                   ))}
+                  {rowActions ? <th scope="col">Actions</th> : null}
                 </tr>
               </thead>
               <tbody>
@@ -227,6 +247,9 @@ function ModuleListScreen<T extends ModuleRow>({
                         <td key={column.header}>{column.render(item)}</td>
                       ),
                     )}
+                    {rowActions ? (
+                      <td className="directory-actions">{rowActions(item)}</td>
+                    ) : null}
                   </tr>
                 ))}
               </tbody>

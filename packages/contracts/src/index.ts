@@ -38,6 +38,25 @@ export {
   PEOPLE_SEARCH_MAX_LENGTH,
 } from './people.js';
 export type {
+  CrmAccountCreateInput,
+  CrmAccountListInput,
+  CrmAccountListItem,
+  CrmAccountListResponse,
+  CrmAccountStatus,
+  CrmAccountUpdateInput,
+  CrmContactCreateInput,
+  CrmContactItem,
+  CrmContactListResponse,
+  CrmContactUpdateInput,
+} from './crm.js';
+export {
+  CRM_ACCOUNT_STATUSES,
+  CRM_LIST_DEFAULT_PAGE_SIZE,
+  CRM_LIST_MAX_PAGE_SIZE,
+  CRM_PAYMENT_TERMS_DAYS_MAX,
+  CRM_SEARCH_MAX_LENGTH,
+} from './crm.js';
+export type {
   ContentListInput,
   ContentListItem,
   ContentListResponse,

@@ -12,13 +12,16 @@ import {
 // In PERMISSIONS order, which is the order /v1/context answers in. Salary
 // history comes after both People directory permissions because it is a third
 // question the People module asks, not a variant of either, and its write half
-// sits beside the read it belongs to. The three module reads follow, one per
-// module that has a shipped read surface.
+// sits beside the read it belongs to. The two CRM permissions follow the four
+// People ones because CRM is the second module in the catalog order. The three
+// module reads come last, one per module that has a shipped read surface.
 const ALL_PERMISSIONS = [
   'people.read',
   'people.write',
   'people.compensation.read',
   'people.compensation.write',
+  'crm.read',
+  'crm.write',
   'work.read',
   'money.read',
   'content.read',
@@ -35,10 +38,11 @@ const ROLE_MATRIX: Record<MembershipRole, string[]> = {
     'people.read',
     COMPENSATION_READ,
     COMPENSATION_WRITE,
+    'crm.read',
     'work.read',
     'money.read',
   ],
-  manager: ['people.read', 'work.read'],
+  manager: ['people.read', 'crm.read', 'work.read'],
   employee: [],
   auditor: ['people.read', 'work.read'],
 };
@@ -57,7 +61,7 @@ describe('authorization policy', () => {
     expect(new Set(MEMBERSHIP_ROLES).size).toBe(7);
   });
 
-  test('publishes the two module operations and the seven published permissions', () => {
+  test('publishes the two module operations and the nine published permissions', () => {
     expect(MODULE_OPERATIONS).toEqual(['read', 'write']);
     expect(PERMISSIONS).toEqual(ALL_PERMISSIONS);
     expect(new Set(PERMISSIONS).size).toBe(PERMISSIONS.length);
@@ -193,9 +197,33 @@ describe('authorization policy', () => {
     }
   });
 
+  test('gives the CRM read to four roles and the CRM write to two', () => {
+    // The standalone-CRM thesis: a member whose only module is CRM still has
+    // to be able to read accounts, so the read cannot depend on holding a
+    // People permission.
+    for (const role of ['owner', 'admin', 'finance', 'manager'] as const) {
+      expect(hasPermission(role, 'crm.read')).toBe(true);
+    }
+    for (const role of ['hr', 'employee', 'auditor'] as const) {
+      expect(hasPermission(role, 'crm.read')).toBe(false);
+    }
+
+    // The write is an administrative act on a commercial record, so only the
+    // two roles that administer the workspace hold it. A manager and a finance
+    // member read accounts to work against them; neither renames one.
+    for (const role of ['owner', 'admin'] as const) {
+      expect(hasPermission(role, 'crm.write')).toBe(true);
+    }
+    for (const role of ['hr', 'finance', 'manager', 'employee', 'auditor'] as const) {
+      expect(hasPermission(role, 'crm.write')).toBe(false);
+    }
+  });
+
   test('permissionFor maps only known module and operation pairs', () => {
     expect(permissionFor('people', 'read')).toBe('people.read');
     expect(permissionFor('people', 'write')).toBe('people.write');
+    expect(permissionFor('crm', 'read')).toBe('crm.read');
+    expect(permissionFor('crm', 'write')).toBe('crm.write');
     expect(permissionFor('work', 'read')).toBe('work.read');
     expect(permissionFor('money', 'read')).toBe('money.read');
     expect(permissionFor('content', 'read')).toBe('content.read');

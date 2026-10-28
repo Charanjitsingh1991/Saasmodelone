@@ -53,21 +53,34 @@ All five modules are being built now, by the owner's decision of 27 October
 2026, reviewed in batches of three slices each carrying one ADR, one doc pass
 and one gate run. This is a departure from the sequencing rule in
 suite/docs/roadmap.md, which is amended and dated there rather than deleted.
-The standalone-CRM thesis survives as a requirement on the CRM slice.
+The standalone-CRM thesis survives as a requirement on the CRM slice, and
+Batch 2 carries that proof: a CRM-only tenant with no People entitlement
+manages accounts and contacts without reaching into a module it does not hold.
 
-State as of this batch (Batch 1 - Work, Money and Content, suite/docs/adr/0013-work-money-content-read.md):
+State as of this batch (Batch 2 - standalone CRM accounts and contacts, suite/docs/adr/0014-crm-accounts-contacts.md):
 
 - **M0 has not exited.** No batch exits it on its own, and nothing in this
   repository may claim it has.
-- **CRM has no tables in the schema yet.** It is a batch of its own.
+- **CRM ships accounts and contacts on the shared `client` and `client_contact`
+  rows.** There is no CRM-specific table and this batch added no migration, no
+  policy and no table grant. CRM is a module that reads and writes the shared
+  client records behind its own module gate.
+- **CRM is a preview module with a read surface and a write surface** - GET,
+  POST and PATCH /v1/crm/accounts, and GET, POST and PATCH
+  /v1/crm/accounts/:accountId/contacts, plus the accounts screen and its
+  contacts panel. Leads, pipeline, activities, forecast and export are not
+  built, so the CRM module is not complete and the standalone sale is not
+  ready: the export and the lead-to-pipeline path remain unbuilt. There is no
+  contact delete, because the shared client_contact table has no soft-delete
+  column and the runtime holds no DELETE privilege on it.
 - **Work, Money and Content have read surfaces only** - GET /v1/work/projects,
   GET /v1/money/invoices and GET /v1/content/items, plus three read-only
-  screens. There is no write surface in any of the three modules.
+  screens. There is no write surface in any of those three modules.
 - **Switch import is still out of scope.**
 - **Payroll calculation and statutory packs remain out of scope**, because
   there is no reviewed jurisdiction pack. Do not invent a statutory rule, a
   tax rate, a currency conversion or a payroll formula.
-- The module catalog is at 'preview' for People, Work, Money and Content and
-  'planned' for CRM, Procurement, Assets and Analytics. There is no
+- The module catalog is at 'preview' for People, CRM, Work, Money and Content
+  and 'planned' for Procurement, Assets and Analytics. There is no
   administrative path for catalog status: the seed file and its idempotent
   update are the only writers of platform_module.status.

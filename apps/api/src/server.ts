@@ -9,6 +9,11 @@ import {
   CONTENT_LIST_DEFAULT_PAGE_SIZE,
   CONTENT_LIST_MAX_PAGE_SIZE,
   CONTENT_SEARCH_MAX_LENGTH,
+  CRM_ACCOUNT_STATUSES,
+  CRM_LIST_DEFAULT_PAGE_SIZE,
+  CRM_LIST_MAX_PAGE_SIZE,
+  CRM_PAYMENT_TERMS_DAYS_MAX,
+  CRM_SEARCH_MAX_LENGTH,
   EMPLOYMENT_NOTICE_DAYS_MAX,
   EMPLOYMENT_STATUSES,
   EMPLOYMENT_TYPES,
@@ -33,6 +38,10 @@ import {
   type CompensationPayFrequency,
   type ContentListItem,
   type ContentListResponse,
+  type CrmAccountListItem,
+  type CrmAccountListResponse,
+  type CrmContactItem,
+  type CrmContactListResponse,
   type EmploymentItem,
   type EmploymentListResponse,
   type EmploymentStatus,
@@ -52,6 +61,7 @@ import Fastify, {
   type FastifyReply,
   type FastifyRequest,
 } from 'fastify';
+import type { PoolClient } from 'pg';
 import {
   appendAuditEvent,
   AuthError,
@@ -1166,6 +1176,401 @@ function contentItemFromRow(row: ContentRow): ContentListItem {
   };
 }
 
+// ---------------------------------------------------------------------------
+// The CRM account surface.
+//
+// A CRM account is a shared client record. The platform owns client identity
+// and CRM is the module that reads and writes it, so this is not a second
+// account table and not a copy of one. The route therefore selects the client
+// row directly, and the module policy that protects it is the module gate on
+// the route rather than a restrictive policy on the table: client carries the
+// permissive tenant_isolation policy only, because a Work or Money read must
+// still be able to name a client without holding a CRM licence.
+// ---------------------------------------------------------------------------
+
+// The eight fields the account surface names, and nothing else. tenant_id,
+// owner_user_id, the provenance columns, the timestamps and deleted_at are
+// never selected here: deleted_at is used only to drop a soft-deleted row, and
+// it is not an answer.
+const CRM_ACCOUNT_SELECT = `select c.id,
+                    c.name,
+                    c.code,
+                    c.status,
+                    c.billing_email::text as billing_email,
+                    c.phone,
+                    c.currency::text as currency,
+                    c.payment_terms_days`;
+
+const CRM_ACCOUNT_FROM = 'from client c';
+
+type CrmAccountRow = {
+  id: string;
+  name: string;
+  code: string | null;
+  status: string;
+  billing_email: string | null;
+  phone: string | null;
+  currency: string;
+  payment_terms_days: number;
+};
+
+function crmAccountItemFromRow(row: CrmAccountRow): CrmAccountListItem {
+  return {
+    id: row.id,
+    name: row.name,
+    code: row.code,
+    status: row.status,
+    billingEmail: row.billing_email,
+    phone: row.phone,
+    currency: row.currency,
+    paymentTermsDays: row.payment_terms_days,
+  };
+}
+
+// The contact surface reads the shared client_contact table. The item carries
+// exactly the six fields the surface names: the account a contact belongs to
+// is named by the route, and the tenant and the timestamps stay on the row.
+// This table has no soft-delete column, which is why there is no delete route.
+const CRM_CONTACT_SELECT = `select ct.id,
+                    ct.name,
+                    ct.email::text as email,
+                    ct.phone,
+                    ct.role,
+                    ct.is_primary as "isPrimary"`;
+
+const CRM_CONTACT_FROM = 'from client_contact ct';
+
+type CrmContactRow = {
+  id: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  role: string | null;
+  isPrimary: boolean;
+};
+
+function crmContactItemFromRow(row: CrmContactRow): CrmContactItem {
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    phone: row.phone,
+    role: row.role,
+    isPrimary: row.isPrimary,
+  };
+}
+
+// The five fields a contact write may name. The body is closed: a key that is
+// not on this list is refused, so a caller cannot reach a column the route
+// never writes.
+const CRM_CONTACT_WRITE_FIELDS = [
+  'name',
+  'email',
+  'phone',
+  'role',
+  'isPrimary',
+] as const;
+
+type CrmContactWriteField = (typeof CRM_CONTACT_WRITE_FIELDS)[number];
+
+const CRM_CONTACT_COLUMNS: Record<CrmContactWriteField, string> = {
+  name: 'name',
+  email: 'email',
+  phone: 'phone',
+  role: 'role',
+  isPrimary: 'is_primary',
+};
+
+// The five values of one contact, always complete. The patch route fills the
+// gaps from the stored row, so both routes decide the table's invariants over
+// one shape rather than over a half-supplied one.
+type CrmContactValues = {
+  name: string;
+  email: string | null;
+  phone: string | null;
+  role: string | null;
+  isPrimary: boolean;
+};
+
+type CrmContactWriteParse = {
+  // Field names the caller actually sent, so the audit can record which
+  // fields were written without recording any of their values.
+  present: CrmContactWriteField[];
+  // Trimmed values. A blank or null optional field is null; an absent field is
+  // undefined, which the patch route reads as "unchanged".
+  values: Partial<CrmContactValues>;
+};
+
+// One parser for both writes: create requires a name, patch takes any
+// non-empty subset of the five and validates the merged record afterwards.
+// Only email, phone and role may be null; the name and the primary flag are
+// the two values a row always holds.
+function parseCrmContactWrite(
+  body: Record<string, unknown>,
+  mode: 'create' | 'patch',
+): CrmContactWriteParse {
+  for (const key of Object.keys(body)) {
+    if (!(CRM_CONTACT_WRITE_FIELDS as readonly string[]).includes(key)) {
+      throw new ApiError(400, 'INVALID_BODY');
+    }
+  }
+
+  const present: CrmContactWriteField[] = [];
+  const values: Partial<CrmContactValues> = {};
+
+  for (const field of CRM_CONTACT_WRITE_FIELDS) {
+    if (!Object.hasOwn(body, field)) {
+      continue;
+    }
+    const raw = body[field];
+    present.push(field);
+
+    if (field === 'name') {
+      if (typeof raw !== 'string' || raw.trim() === '') {
+        throw new ApiError(400, 'INVALID_BODY');
+      }
+      values.name = raw.trim();
+      continue;
+    }
+
+    if (field === 'isPrimary') {
+      if (typeof raw !== 'boolean') {
+        throw new ApiError(400, 'INVALID_BODY');
+      }
+      values.isPrimary = raw;
+      continue;
+    }
+
+    // email, phone and role: a blank or null clears them.
+    if (raw !== null && typeof raw !== 'string') {
+      throw new ApiError(400, 'INVALID_BODY');
+    }
+    const trimmed = typeof raw === 'string' ? raw.trim() : '';
+    values[field] = trimmed === '' ? null : trimmed;
+  }
+
+  if (mode === 'create' && values.name === undefined) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  if (present.length === 0) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  return { present, values };
+}
+
+// The merged record, always complete. The two values that may not stand empty
+// are checked again over the merged shape, so a patch cannot build a record
+// the create path would have refused.
+function checkCrmContactValues(values: CrmContactValues): void {
+  if (values.name.trim() === '') {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+}
+
+// One answer for every way an account id can fail to name a live account in
+// this tenant: malformed, unknown, another tenant's, or withdrawn. The account
+// is settled before any contact is looked at, so a caller who cannot see the
+// account learns nothing about the contacts that hang off it.
+async function requireCrmAccount(
+  client: PoolClient,
+  accountId: unknown,
+): Promise<string> {
+  if (typeof accountId !== 'string' || !UUID_TEXT_PATTERN.test(accountId)) {
+    throw new ApiError(404, 'ACCOUNT_NOT_FOUND');
+  }
+  const account = await client.query(
+    `${CRM_ACCOUNT_SELECT}
+      ${CRM_ACCOUNT_FROM}
+      where c.id = $1 and c.deleted_at is null`,
+    [accountId],
+  );
+  if (account.rowCount !== 1) {
+    throw new ApiError(404, 'ACCOUNT_NOT_FOUND');
+  }
+  return accountId;
+}
+
+// Demote the account's other primary contacts and answer with the ids that
+// moved. The account holds at most one primary contact, and the write that
+// names a new primary demotes the old one in the same transaction, so the
+// partial unique index on the table holds at every point another session can
+// see the rows.
+async function demoteOtherPrimaries(
+  client: PoolClient,
+  accountId: string,
+  exceptId: string | null,
+): Promise<string[]> {
+  const demoted = await client.query<{ id: string }>(
+    `update client_contact
+        set is_primary = false
+      where client_id = $1
+        and is_primary
+        and ($2::uuid is null or id <> $2::uuid)
+      returning id`,
+    [accountId, exceptId],
+  );
+  return demoted.rows.map((row) => row.id);
+}
+
+// The seven fields an account write may name. The body is closed: a key that
+// is not on this list is refused, so a caller cannot reach a column the route
+// never writes.
+const CRM_ACCOUNT_WRITE_FIELDS = [
+  'name',
+  'code',
+  'status',
+  'billingEmail',
+  'phone',
+  'currency',
+  'paymentTermsDays',
+] as const;
+
+type CrmAccountWriteField = (typeof CRM_ACCOUNT_WRITE_FIELDS)[number];
+
+const CRM_ACCOUNT_COLUMNS: Record<CrmAccountWriteField, string> = {
+  name: 'name',
+  code: 'code',
+  status: 'status',
+  billingEmail: 'billing_email',
+  phone: 'phone',
+  currency: 'currency',
+  paymentTermsDays: 'payment_terms_days',
+};
+
+// The seven values of one account, always complete. The patch route fills the
+// gaps from the stored row, so both routes decide the table's invariants over
+// one shape rather than over a half-supplied one.
+type CrmAccountValues = {
+  name: string;
+  code: string | null;
+  status: string;
+  billingEmail: string | null;
+  phone: string | null;
+  currency: string;
+  paymentTermsDays: number;
+};
+
+type CrmAccountWriteParse = {
+  // Field names the caller actually sent, so the audit can record which
+  // fields were written without recording their values.
+  present: CrmAccountWriteField[];
+  // Trimmed values. A blank or null optional field is null; an absent field is
+  // undefined, which the patch route reads as "unchanged".
+  values: Partial<CrmAccountValues>;
+};
+
+// Three upper-case ASCII letters and nothing else. This is a stored code and
+// nothing more: no registry resolves it, no rate converts it and no
+// jurisdiction is implied by it. Lower case is refused rather than
+// upper-cased, because a client that sends "inr" has a bug in its own
+// currency handling and silently storing "INR" would hide it.
+function crmAccountCurrency(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Z]{3}$/.test(value)) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  return value;
+}
+
+// The stored payment terms, in days. The bound is the PostgreSQL integer
+// range, which is the widest value the column can hold; a number outside it
+// is a client error rather than a number to round.
+function crmAccountPaymentTermsDays(value: unknown): number {
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < 0 ||
+    value > CRM_PAYMENT_TERMS_DAYS_MAX
+  ) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  return value;
+}
+
+// One parser for both writes: create requires name and currency, patch takes
+// any non-empty subset of the seven and validates the merged record
+// afterwards. The four columns the table does not let stand empty - name,
+// status, currency and payment_terms_days - may never be null; the other
+// three may.
+function parseCrmAccountWrite(
+  body: Record<string, unknown>,
+  mode: 'create' | 'patch',
+): CrmAccountWriteParse {
+  for (const key of Object.keys(body)) {
+    if (!(CRM_ACCOUNT_WRITE_FIELDS as readonly string[]).includes(key)) {
+      throw new ApiError(400, 'INVALID_BODY');
+    }
+  }
+
+  const present: CrmAccountWriteField[] = [];
+  const values: Partial<CrmAccountValues> = {};
+
+  for (const field of CRM_ACCOUNT_WRITE_FIELDS) {
+    if (!Object.hasOwn(body, field)) {
+      continue;
+    }
+    const raw = body[field];
+    present.push(field);
+
+    if (field === 'name') {
+      if (typeof raw !== 'string' || raw.trim() === '') {
+        throw new ApiError(400, 'INVALID_BODY');
+      }
+      values.name = raw.trim();
+      continue;
+    }
+
+    if (field === 'status') {
+      if (
+        typeof raw !== 'string' ||
+        !(CRM_ACCOUNT_STATUSES as readonly string[]).includes(raw)
+      ) {
+        throw new ApiError(400, 'INVALID_BODY');
+      }
+      values.status = raw;
+      continue;
+    }
+
+    if (field === 'currency') {
+      values.currency = crmAccountCurrency(raw);
+      continue;
+    }
+
+    if (field === 'paymentTermsDays') {
+      values.paymentTermsDays = crmAccountPaymentTermsDays(raw);
+      continue;
+    }
+
+    // code, billingEmail and phone: a blank or null clears them.
+    if (raw !== null && typeof raw !== 'string') {
+      throw new ApiError(400, 'INVALID_BODY');
+    }
+    const trimmed = typeof raw === 'string' ? raw.trim() : '';
+    values[field] = trimmed === '' ? null : trimmed;
+  }
+
+  if (mode === 'create' && (values.name === undefined || values.currency === undefined)) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  if (present.length === 0) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  return { present, values };
+}
+
+// The merged record, always complete. The four columns that may not stand
+// empty are checked again over the merged shape, so a patch cannot build a
+// record the create path would have refused.
+function checkCrmAccountValues(values: CrmAccountValues): void {
+  if (values.name.trim() === '') {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  if (!(CRM_ACCOUNT_STATUSES as readonly string[]).includes(values.status)) {
+    throw new ApiError(400, 'INVALID_BODY');
+  }
+  crmAccountCurrency(values.currency);
+  crmAccountPaymentTermsDays(values.paymentTermsDays);
+}
+
 function validateRateLimit(options: RateLimitOptions, name: string): RateLimitOptions {
   if (
     !Number.isInteger(options.max) ||
@@ -1330,13 +1735,14 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
   // Auth, context, directory and module responses carry credentials, session,
   // authorization or tenant data and must never be cached by a browser, proxy
   // or shared cache, including error responses. Every People path is covered by
-  // prefix, so a write, a 4xx and a 5xx are all no-store too, and the three
-  // module read surfaces are covered the same way.
+  // prefix, so a write, a 4xx and a 5xx are all no-store too, and the module
+  // surfaces are covered the same way.
   app.addHook('onSend', async (request, reply) => {
     if (
       request.url.startsWith('/v1/auth/') ||
       request.url.startsWith('/v1/context') ||
       request.url.startsWith('/v1/people') ||
+      request.url.startsWith('/v1/crm') ||
       request.url.startsWith('/v1/work') ||
       request.url.startsWith('/v1/money') ||
       request.url.startsWith('/v1/content')
@@ -3072,6 +3478,645 @@ export function createServer(options: CreateServerOptions): FastifyInstance {
             pageSize,
           };
           return body;
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  // The CRM account read surface. A shared client record, read through the
+  // module gate rather than a module policy on the table.
+  app.get('/v1/crm/accounts', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+
+    const query = request.query as Record<string, unknown>;
+    const searchTerm = listSearchTerm(query, CRM_SEARCH_MAX_LENGTH);
+    const page = listIntegerParam(query, 'page', 1, LIST_MAX_PAGE);
+    const pageSize = listIntegerParam(
+      query,
+      'pageSize',
+      CRM_LIST_DEFAULT_PAGE_SIZE,
+      CRM_LIST_MAX_PAGE_SIZE,
+    );
+
+    try {
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'crm', operation: 'read' },
+        },
+        async (client) => {
+          // A soft-deleted client is not an account: the row stays for the
+          // invoices and projects that name it, and it is dropped here.
+          const clauses = ['c.deleted_at is null'];
+          const filterValues: string[] = [];
+          if (searchTerm !== '') {
+            filterValues.push(searchTerm);
+            const needle = `$${filterValues.length}`;
+            // strpos over the lowered columns is a literal match, so a search
+            // for "%" or "_" cannot behave like a LIKE wildcard.
+            clauses.push(
+              `(strpos(lower(c.name), lower(${needle})) > 0
+                 or strpos(lower(coalesce(c.code, '')), lower(${needle})) > 0
+                 or strpos(lower(coalesce(c.billing_email::text, '')), lower(${needle})) > 0)`,
+            );
+          }
+          const where = clauses.join(' and ');
+          const limitIndex = filterValues.length + 1;
+
+          const matching = await client.query<{ total: string }>(
+            `select count(*) as total ${CRM_ACCOUNT_FROM} where ${where}`,
+            filterValues,
+          );
+          const pageRows = await client.query<CrmAccountRow>(
+            `${CRM_ACCOUNT_SELECT}
+              ${CRM_ACCOUNT_FROM}
+              where ${where}
+              order by lower(c.name), c.id
+              limit $${limitIndex} offset $${limitIndex + 1}`,
+            [...filterValues, pageSize, (page - 1) * pageSize],
+          );
+
+          const items: CrmAccountListItem[] = pageRows.rows.map(
+            crmAccountItemFromRow,
+          );
+
+          const body: CrmAccountListResponse = {
+            items,
+            total: Number(matching.rows[0]?.total ?? '0'),
+            page,
+            pageSize,
+          };
+          return body;
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  // The CRM account create. One gate, one explicit column list, one read-back.
+  app.post('/v1/crm/accounts', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+    requireCsrfToken(session, request);
+
+    try {
+      const item = await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'crm', operation: 'write' },
+        },
+        async (client) => {
+          // Only now is the body read. A caller who may not write learns
+          // nothing about what a valid account looks like from the order of
+          // the refusals, and one who may gets a 400 they can act on.
+          const parsed = parseCrmAccountWrite(peopleWriteObject(request.body), 'create');
+
+          const name = parsed.values.name as string;
+          const currency = parsed.values.currency as string;
+
+          // The column list is the reviewed one; the body chooses only whether
+          // the two defaulted columns are named at all. status and
+          // payment_terms_days take the database's own defaults when the
+          // caller leaves them out, and every other column of the table -
+          // owner_user_id, the provenance columns, the timestamps and
+          // deleted_at - is never named here.
+          const columns = [
+            'id',
+            'tenant_id',
+            'name',
+            'code',
+            'billing_email',
+            'phone',
+            'currency',
+          ];
+          const expressions = ['$1', 'app.current_tenant_id()', '$2', '$3', '$4', '$5', '$6'];
+          const bound: unknown[] = [
+            randomUUID(),
+            name,
+            parsed.values.code ?? null,
+            parsed.values.billingEmail ?? null,
+            parsed.values.phone ?? null,
+            currency,
+          ];
+
+          if (parsed.values.status !== undefined) {
+            columns.push('status');
+            expressions.push(`$${bound.length + 1}`);
+            bound.push(parsed.values.status);
+          }
+          if (parsed.values.paymentTermsDays !== undefined) {
+            columns.push('payment_terms_days');
+            expressions.push(`$${bound.length + 1}`);
+            bound.push(parsed.values.paymentTermsDays);
+          }
+
+          const id = bound[0] as string;
+
+          try {
+            await client.query(
+              `insert into client (${columns.join(', ')})
+               values (${expressions.join(', ')})`,
+              bound,
+            );
+          } catch (error) {
+            const violation = error as { code?: string };
+            if (violation.code !== '23505') {
+              throw error;
+            }
+            // unique (tenant_id, code) is the only key this path can collide
+            // with, and the answer names the conflict without repeating the
+            // value that was sent.
+            throw new ApiError(409, 'ACCOUNT_CODE_TAKEN');
+          }
+
+          // The answer is the read-back, from the same select fragment the
+          // list uses, so a write answer and a list answer cannot diverge.
+          const created = await client.query<CrmAccountRow>(
+            `${CRM_ACCOUNT_SELECT}
+              ${CRM_ACCOUNT_FROM}
+              where c.id = $1`,
+            [id],
+          );
+          const row = created.rows[0];
+          if (!row) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          await appendAuditEvent(client, {
+            action: 'crm.account.created',
+            entityType: 'crm_account',
+            entityId: id,
+            actorType: 'user',
+            actorUserId: session.userId,
+            // Field names and nothing else: the name, the code, the email, the
+            // phone, the currency and the terms stay on the row, and an audit
+            // trail that copied them into metadata would be a second place to
+            // read them from.
+            metadata: { fields: [...parsed.present].sort() },
+            ip: request.ip,
+            userAgent: request.headers['user-agent'] ?? null,
+          });
+
+          return crmAccountItemFromRow(row);
+        },
+      );
+
+      reply.code(201);
+      return item;
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  // The CRM account update. One gate, one explicit column list, one read-back.
+  app.patch('/v1/crm/accounts/:id', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+    requireCsrfToken(session, request);
+
+    const accountId = (request.params as { id?: unknown }).id;
+
+    try {
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'crm', operation: 'write' },
+        },
+        async (client) => {
+          if (typeof accountId !== 'string' || !UUID_TEXT_PATTERN.test(accountId)) {
+            throw new ApiError(404, 'ACCOUNT_NOT_FOUND');
+          }
+
+          // One answer for every way the id can fail to name a live account in
+          // this tenant: unknown, malformed, another tenant's, or withdrawn.
+          const current = await client.query<CrmAccountRow>(
+            `${CRM_ACCOUNT_SELECT}
+              ${CRM_ACCOUNT_FROM}
+              where c.id = $1 and c.deleted_at is null`,
+            [accountId],
+          );
+          const currentRow = current.rows[0];
+          if (!currentRow) {
+            throw new ApiError(404, 'ACCOUNT_NOT_FOUND');
+          }
+          const currentItem = crmAccountItemFromRow(currentRow);
+
+          const parsed = parseCrmAccountWrite(peopleWriteObject(request.body), 'patch');
+
+          // An absent key keeps the stored value; a present one states it.
+          const values: CrmAccountValues = {
+            name: parsed.values.name ?? currentItem.name,
+            code: Object.hasOwn(parsed.values, 'code')
+              ? parsed.values.code ?? null
+              : currentItem.code,
+            status: parsed.values.status ?? currentItem.status,
+            billingEmail: Object.hasOwn(parsed.values, 'billingEmail')
+              ? parsed.values.billingEmail ?? null
+              : currentItem.billingEmail,
+            phone: Object.hasOwn(parsed.values, 'phone')
+              ? parsed.values.phone ?? null
+              : currentItem.phone,
+            currency: parsed.values.currency ?? currentItem.currency,
+            paymentTermsDays:
+              parsed.values.paymentTermsDays ?? currentItem.paymentTermsDays,
+          };
+          checkCrmAccountValues(values);
+
+          const changed = CRM_ACCOUNT_WRITE_FIELDS.filter(
+            (field) => values[field] !== currentItem[field],
+          ).sort();
+
+          if (changed.length === 0) {
+            // Nothing moved: no UPDATE, no audit row, and the stored row
+            // answers.
+            return currentItem;
+          }
+
+          const setValues: unknown[] = [];
+          const assignments = changed.map((field) => {
+            setValues.push(values[field]);
+            return `${CRM_ACCOUNT_COLUMNS[field]} = $${setValues.length}`;
+          });
+
+          try {
+            const updated = await client.query(
+              `update client
+                  set ${assignments.join(', ')}
+                where id = $${setValues.length + 1}
+                  and deleted_at is null`,
+              [...setValues, accountId],
+            );
+            // One row or none: a statement that succeeded but matched nothing
+            // would mean a policy moved under the transaction, so the write and
+            // its audit row both roll back to a sanitized 500.
+            if (updated.rowCount !== 1) {
+              throw new ApiError(500, 'INTERNAL_ERROR');
+            }
+          } catch (error) {
+            const violation = error as { code?: string };
+            if (violation.code !== '23505') {
+              throw error;
+            }
+            // Moving an account onto a code this tenant already holds is the
+            // same collision a create can make, and it gets the same answer.
+            throw new ApiError(409, 'ACCOUNT_CODE_TAKEN');
+          }
+
+          const written = await client.query<CrmAccountRow>(
+            `${CRM_ACCOUNT_SELECT}
+              ${CRM_ACCOUNT_FROM}
+              where c.id = $1`,
+            [accountId],
+          );
+          const row = written.rows[0];
+          if (!row) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          await appendAuditEvent(client, {
+            action: 'crm.account.updated',
+            entityType: 'crm_account',
+            entityId: accountId,
+            actorType: 'user',
+            actorUserId: session.userId,
+            // The changed field names only, in the same reviewed key set a
+            // create writes. No before or after value of any field is
+            // recorded here.
+            metadata: { fields: changed },
+            ip: request.ip,
+            userAgent: request.headers['user-agent'] ?? null,
+          });
+
+          return crmAccountItemFromRow(row);
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  // The CRM contact read surface. The account in the path is checked first, so
+  // a caller who cannot see the account learns nothing about the contacts
+  // that hang off it.
+  app.get('/v1/crm/accounts/:accountId/contacts', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+
+    const accountId = (request.params as { accountId?: unknown }).accountId;
+
+    try {
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'crm', operation: 'read' },
+        },
+        async (client) => {
+          const account = await requireCrmAccount(client, accountId);
+
+          const rows = await client.query<CrmContactRow>(
+            `${CRM_CONTACT_SELECT}
+              ${CRM_CONTACT_FROM}
+              where ct.client_id = $1
+              order by ct.is_primary desc, lower(ct.name), ct.id`,
+            [account],
+          );
+          const counted = await client.query<{ total: string }>(
+            `select count(*) as total
+               from client_contact
+              where client_id = $1`,
+            [account],
+          );
+
+          const body: CrmContactListResponse = {
+            items: rows.rows.map(crmContactItemFromRow),
+            total: Number(counted.rows[0]?.total ?? '0'),
+          };
+          return body;
+        },
+      );
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  // The CRM contact create. The body is closed, the id is the server's, and
+  // the account in the path is the only thing that can say which account the
+  // contact belongs to.
+  app.post('/v1/crm/accounts/:accountId/contacts', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+    requireCsrfToken(session, request);
+
+    const accountId = (request.params as { accountId?: unknown }).accountId;
+
+    try {
+      const contact = await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'crm', operation: 'write' },
+        },
+        async (client) => {
+          const account = await requireCrmAccount(client, accountId);
+
+          const parsed = parseCrmContactWrite(peopleWriteObject(request.body), 'create');
+
+          const name = parsed.values.name as string;
+          const isPrimary = parsed.values.isPrimary ?? false;
+
+          // An account holds at most one primary contact. The old primary is
+          // demoted before the new one is written, in the same transaction, so
+          // the partial unique index holds at every point another session can
+          // see the rows.
+          const demoted = isPrimary
+            ? await demoteOtherPrimaries(client, account, null)
+            : [];
+
+          const id = randomUUID();
+          try {
+            await client.query(
+              `insert into client_contact
+                 (id, tenant_id, client_id, name, email, phone, role, is_primary)
+               values ($1, app.current_tenant_id(), $2, $3, $4, $5, $6, $7)`,
+              [
+                id,
+                account,
+                name,
+                parsed.values.email ?? null,
+                parsed.values.phone ?? null,
+                parsed.values.role ?? null,
+                isPrimary,
+              ],
+            );
+          } catch (error) {
+            const violation = error as { code?: string };
+            if (violation.code !== '23505') {
+              throw error;
+            }
+            // The only key this path can collide with is the partial unique
+            // index that keeps one primary contact per account, and the
+            // answer names the conflict without repeating a value.
+            throw new ApiError(409, 'CONTACT_PRIMARY_TAKEN');
+          }
+
+          const created = await client.query<CrmContactRow>(
+            `${CRM_CONTACT_SELECT}
+              ${CRM_CONTACT_FROM}
+              where ct.id = $1`,
+            [id],
+          );
+          const row = created.rows[0];
+          if (!row) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          await appendAuditEvent(client, {
+            action: 'crm.contact.created',
+            entityType: 'crm_contact',
+            entityId: id,
+            actorType: 'user',
+            actorUserId: session.userId,
+            // Field names and nothing else: the name, the email, the phone and
+            // the role stay on the row.
+            metadata: { fields: [...parsed.present].sort() },
+            ip: request.ip,
+            userAgent: request.headers['user-agent'] ?? null,
+          });
+
+          // A demoted contact is a row that moved without the caller naming
+          // it, so it is audited in its own right.
+          for (const demotedId of demoted) {
+            await appendAuditEvent(client, {
+              action: 'crm.contact.updated',
+              entityType: 'crm_contact',
+              entityId: demotedId,
+              actorType: 'user',
+              actorUserId: session.userId,
+              metadata: { fields: ['isPrimary'] },
+              ip: request.ip,
+              userAgent: request.headers['user-agent'] ?? null,
+            });
+          }
+
+          return crmContactItemFromRow(row);
+        },
+      );
+
+      reply.code(201);
+      return contact;
+    } catch (error) {
+      return await accessError(pool, error, request, reply, session);
+    }
+  });
+
+  // The CRM contact update. A contact belongs to the account in the path, and
+  // one that does not is not found.
+  app.patch('/v1/crm/accounts/:accountId/contacts/:contactId', async (request, reply) => {
+    const session = await currentSession(request);
+    if (!session) {
+      return unauthenticated(reply);
+    }
+    requireCsrfToken(session, request);
+
+    const params = request.params as { accountId?: unknown; contactId?: unknown };
+
+    try {
+      return await withMemberTransaction(
+        pool,
+        {
+          tenantId: session.tenantId,
+          userId: session.userId,
+          gate: { module: 'crm', operation: 'write' },
+        },
+        async (client) => {
+          const account = await requireCrmAccount(client, params.accountId);
+
+          const contactId = params.contactId;
+          if (typeof contactId !== 'string' || !UUID_TEXT_PATTERN.test(contactId)) {
+            throw new ApiError(404, 'CONTACT_NOT_FOUND');
+          }
+
+          // One answer for a contact this account does not hold: a contact of
+          // another account and a contact of another tenant are the same
+          // not-found, so the reply says nothing about either.
+          const current = await client.query<CrmContactRow>(
+            `${CRM_CONTACT_SELECT}
+              ${CRM_CONTACT_FROM}
+              where ct.id = $1 and ct.client_id = $2`,
+            [contactId, account],
+          );
+          const currentRow = current.rows[0];
+          if (!currentRow) {
+            throw new ApiError(404, 'CONTACT_NOT_FOUND');
+          }
+          const currentItem = crmContactItemFromRow(currentRow);
+
+          const parsed = parseCrmContactWrite(peopleWriteObject(request.body), 'patch');
+
+          // An absent key keeps the stored value; a present one states it.
+          const values: CrmContactValues = {
+            name: parsed.values.name ?? currentItem.name,
+            email: Object.hasOwn(parsed.values, 'email')
+              ? parsed.values.email ?? null
+              : currentItem.email,
+            phone: Object.hasOwn(parsed.values, 'phone')
+              ? parsed.values.phone ?? null
+              : currentItem.phone,
+            role: Object.hasOwn(parsed.values, 'role')
+              ? parsed.values.role ?? null
+              : currentItem.role,
+            isPrimary: parsed.values.isPrimary ?? currentItem.isPrimary,
+          };
+          checkCrmContactValues(values);
+
+          const changed = CRM_CONTACT_WRITE_FIELDS.filter(
+            (field) => values[field] !== currentItem[field],
+          ).sort();
+
+          if (changed.length === 0) {
+            // Nothing moved: no UPDATE, no audit row, and the stored row
+            // answers.
+            return currentItem;
+          }
+
+          // A contact that becomes the primary demotes the account's other
+          // primary, in the same transaction.
+          const demoted =
+            values.isPrimary && !currentItem.isPrimary
+              ? await demoteOtherPrimaries(client, account, contactId)
+              : [];
+
+          const setValues: unknown[] = [];
+          const assignments = changed.map((field) => {
+            setValues.push(values[field]);
+            return `${CRM_CONTACT_COLUMNS[field]} = $${setValues.length}`;
+          });
+
+          try {
+            const updated = await client.query(
+              `update client_contact
+                  set ${assignments.join(', ')}
+                where id = $${setValues.length + 1}
+                  and client_id = $${setValues.length + 2}`,
+              [...setValues, contactId, account],
+            );
+            // One row or none: a statement that succeeded but matched nothing
+            // would mean a policy moved under the transaction, so the write and
+            // its audit rows both roll back to a sanitized 500.
+            if (updated.rowCount !== 1) {
+              throw new ApiError(500, 'INTERNAL_ERROR');
+            }
+          } catch (error) {
+            const violation = error as { code?: string };
+            if (violation.code !== '23505') {
+              throw error;
+            }
+            // Making a contact primary can collide with the account's other
+            // primary, and it gets the same typed answer a create gets.
+            throw new ApiError(409, 'CONTACT_PRIMARY_TAKEN');
+          }
+
+          const written = await client.query<CrmContactRow>(
+            `${CRM_CONTACT_SELECT}
+              ${CRM_CONTACT_FROM}
+              where ct.id = $1`,
+            [contactId],
+          );
+          const row = written.rows[0];
+          if (!row) {
+            throw new ApiError(500, 'INTERNAL_ERROR');
+          }
+
+          await appendAuditEvent(client, {
+            action: 'crm.contact.updated',
+            entityType: 'crm_contact',
+            entityId: contactId,
+            actorType: 'user',
+            actorUserId: session.userId,
+            // The changed field names only. No before or after value of any
+            // field is recorded here.
+            metadata: { fields: changed },
+            ip: request.ip,
+            userAgent: request.headers['user-agent'] ?? null,
+          });
+
+          for (const demotedId of demoted) {
+            await appendAuditEvent(client, {
+              action: 'crm.contact.updated',
+              entityType: 'crm_contact',
+              entityId: demotedId,
+              actorType: 'user',
+              actorUserId: session.userId,
+              metadata: { fields: ['isPrimary'] },
+              ip: request.ip,
+              userAgent: request.headers['user-agent'] ?? null,
+            });
+          }
+
+          return crmContactItemFromRow(row);
         },
       );
     } catch (error) {
